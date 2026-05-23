@@ -1,0 +1,24 @@
+# 构建缓存（clone 的上游仓库）
+.cache/
+.staging/
+
+# PowerShell 输出
+*.log
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统垃圾文件
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# 本地文件
+tests/
+.claude/
+.trellis
+CLAUDE.md
+AGENTS.md
