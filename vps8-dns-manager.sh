@@ -1136,33 +1136,18 @@ cert_download() {
 
         # Extract PEM content
         local content
-        content=$(json_get "$resp" "content")
-        [[ -z "$content" ]] && content=$(json_get "$resp" "certificate")
-        [[ -z "$content" ]] && content=$(json_get "$resp" "pem")
-        [[ -z "$content" ]] && content=$(json_get "$resp" "result")
-
-        if [[ -z "$content" ]]; then
-            # Maybe raw PEM in response
-            if echo "$resp" | grep -q "BEGIN"; then
-                content="$resp"
-            fi
-        fi
+        content=$(_extract_pem_content "$resp")
 
         if [[ -n "$content" ]]; then
-            content=$(printf '%b' "$content")
-            local fname
+            content=$(_json_unescape "$content")
+            local fname is_priv=0
             case "$dl_type" in
                 fullchain) fname="fullchain.pem" ;;
                 cert)      fname="cert.pem" ;;
-                privkey)   fname="privkey.pem" ;;
+                privkey)   fname="privkey.pem"; is_priv=1 ;;
                 *)         fname="cert.pem" ;;
             esac
-            printf '%s' "$content" > "${save_dir}/${fname}"
-            if [[ "$dl_type" == "privkey" ]]; then
-                chmod 600 "${save_dir}/${fname}"
-            else
-                chmod 644 "${save_dir}/${fname}"
-            fi
+            _write_cert_file "${save_dir}/${fname}" "$content" "$is_priv"
             ok "已保存: ${save_dir}/${fname}"
         else
             err "未获取到 ${dl_type} 内容"
@@ -1305,25 +1290,18 @@ cert_sync() {
             fi
 
             local content
-            content=$(json_get "$resp" "content")
-            [[ -z "$content" ]] && content=$(json_get "$resp" "certificate")
-            [[ -z "$content" ]] && content=$(json_get "$resp" "pem")
-            [[ -z "$content" ]] && content=$(json_get "$resp" "result")
-            if echo "$resp" | grep -q "BEGIN"; then
-                content="$resp"
-            fi
+            content=$(_extract_pem_content "$resp")
 
             if [[ -n "$content" ]]; then
-                content=$(printf '%b' "$content")
-                local fname
+                content=$(_json_unescape "$content")
+                local fname is_priv=0
                 case "$dl_type" in
                     fullchain) fname="fullchain.pem" ;;
                     cert)      fname="cert.pem" ;;
-                    privkey)   fname="privkey.pem" ;;
+                    privkey)   fname="privkey.pem"; is_priv=1 ;;
                     *)         fname="cert.pem" ;;
                 esac
-                printf '%s' "$content" > "${cert_base}/${domain}/${fname}"
-                [[ "$dl_type" == "privkey" ]] && chmod 600 "${cert_base}/${domain}/${fname}"
+                _write_cert_file "${cert_base}/${domain}/${fname}" "$content" "$is_priv"
                 ok "${dl_type} 已更新"
             fi
         done
@@ -1650,17 +1628,12 @@ cli_dispatch() {
             resp=$(api_post_retry "${CERT_API}/download" domain "$domain" type "$dl_type")
             if [[ "$(json_status "$resp")" == "success" ]]; then
                 local content
-                content=$(json_get "$resp" "content")
-                [[ -z "$content" ]] && content=$(json_get "$resp" "certificate")
-                [[ -z "$content" ]] && content=$(json_get "$resp" "pem")
-                [[ -z "$content" ]] && content=$(json_get "$resp" "result")
-                if [[ -z "$content" ]] && echo "$resp" | grep -q "BEGIN"; then
-                    content="$resp"
-                fi
+                content=$(_extract_pem_content "$resp")
                 if [[ -n "$content" ]]; then
-                    local fname="${dl_type}.pem"
-                    printf '%b' "$content" > "${save_dir}/${fname}"
-                    [[ "$dl_type" == "privkey" ]] && chmod 600 "${save_dir}/${fname}"
+                    content=$(_json_unescape "$content")
+                    local fname="${dl_type}.pem" is_priv=0
+                    [[ "$dl_type" == "privkey" ]] && is_priv=1
+                    _write_cert_file "${save_dir}/${fname}" "$content" "$is_priv"
                     ok "Saved: ${save_dir}/${fname}"
                 else
                     err "未获取到证书内容"
@@ -1676,8 +1649,7 @@ cli_dispatch() {
             local domain="$1"
             is_domain "$domain" || { err "无效域名"; return 1; }
             local resp
-            resp=$(api_post_retry "${CERT_API}/renew" "domain=${domain}" \
-                "application/x-www-form-urlencoded")
+            resp=$(api_post_retry "${CERT_API}/renew" domain "$domain")
             if [[ "$(json_status "$resp")" == "success" ]]; then
                 ok "Renewal submitted: ${domain}"
             else
