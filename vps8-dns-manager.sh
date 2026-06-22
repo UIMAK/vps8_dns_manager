@@ -477,13 +477,13 @@ dns_list_domains() {
     done
 
     # Print table
-    sep
-    printf "  ${BOLD}%-5s  %-40s${NC}\n" "#" "域名"
-    sep
+    echo -e "  ${DIM}$(printf '%.0s─' $(seq 1 50))${NC}"
+    printf "  ${BOLD}%-5s %-40s${NC}\n" "#" "DOMAIN"
+    echo -e "  ${DIM}$(printf '%.0s─' $(seq 1 50))${NC}"
     for ((i=0; i<${#domains[@]}; i++)); do
-        printf "  ${CYAN}%-5s${NC}  %-40s\n" "$((i+1))" "${domains[$i]}"
+        printf "  ${CYAN}%-5s${NC} %-40s\n" "$((i+1))" "${domains[$i]}"
     done
-    sep
+    echo -e "  ${DIM}$(printf '%.0s─' $(seq 1 50))${NC}"
     info "共 ${#domains[@]} 个域名"
 }
 
@@ -526,16 +526,16 @@ dns_list_records() {
     done
 
     # Print table
-    sep
-    printf "  ${BOLD}%-8s %-16s %-8s %-30s %-6s${NC}\n" "ID" "主机" "类型" "值" "TTL"
-    sep
+    echo -e "  ${DIM}$(printf '%.0s─' $(seq 1 72))${NC}"
+    printf "  ${BOLD}%-8s %-16s %-8s %-30s %-6s${NC}\n" "ID" "HOST" "TYPE" "VALUE" "TTL"
+    echo -e "  ${DIM}$(printf '%.0s─' $(seq 1 72))${NC}"
     for ((i=0; i<${#ids[@]}; i++)); do
         local type_c
         type_c=$(_type_color "${types[$i]}")
         printf "  %-8s %-16s %b %-30s %-6s\n" \
             "${ids[$i]}" "${hosts[$i]}" "$type_c" "${vals[$i]}" "${ttls[$i]:-300}"
     done
-    sep
+    echo -e "  ${DIM}$(printf '%.0s─' $(seq 1 72))${NC}"
     info "共 ${#ids[@]} 条记录"
 }
 
@@ -760,7 +760,7 @@ cert_list() {
         state=$(json_get "$resp" "state")
 
         sep
-        printf "  ${BOLD}%-8s %-30s %-22s %-10s${NC}\n" "ID" "域名" "到期时间" "状态"
+        printf "  ${BOLD}%-8s %-30s %-22s %-10s${NC}\n" "ID" "DOMAIN" "EXPIRES" "STATUS"
         sep
         local sc="${GREEN}"
         [[ "$cert_status" == "expired" || "$state" == "expired" ]] && sc="${RED}"
@@ -795,7 +795,7 @@ cert_list() {
     done
 
     sep
-    printf "  ${BOLD}%-8s %-30s %-22s %-10s${NC}\n" "ID" "域名" "到期时间" "状态"
+    printf "  ${BOLD}%-8s %-30s %-22s %-10s${NC}\n" "ID" "DOMAIN" "EXPIRES" "STATUS"
     sep
     for ((i=0; i<${#c_ids[@]}; i++)); do
         local sc="${GREEN}"
@@ -884,6 +884,32 @@ cert_download() {
             err "未获取到 ${dl_type} 内容"
         fi
     done
+
+    # Offer to set up auto-update cron for this domain
+    echo ""
+    if confirm "是否为 ${domain} 设置每日自动更新 (cron)?" "y"; then
+        _cert_cron_add "$domain"
+    fi
+}
+
+# Add/update crontab entry for a domain's cert auto-update
+_cert_cron_add() {
+    local domain="$1"
+    local script_path
+    script_path=$(readlink -f "$0" 2>/dev/null || echo "$0")
+    local cron_cmd="0 3 * * * /bin/bash ${script_path} cert-download ${domain} fullchain >/dev/null 2>&1 && /bin/bash ${script_path} cert-download ${domain} cert >/dev/null 2>&1 && /bin/bash ${script_path} cert-download ${domain} privkey >/dev/null 2>&1"
+    local cron_tag="# vps8-cert-sync:${domain}"
+
+    # Remove existing entry for this domain
+    local existing
+    existing=$(crontab -l 2>/dev/null || true)
+    existing=$(echo "$existing" | grep -v "$cron_tag")
+
+    # Add new entry
+    printf '%s\n%s %s\n' "$existing" "$cron_cmd" "$cron_tag" | crontab -
+    ok "已设置每日 03:00 自动更新 ${domain} 的证书"
+    info "查看: crontab -l"
+    info "删除: crontab -l | grep -v '${cron_tag}' | crontab -"
 }
 
 cert_sync() {
@@ -1260,15 +1286,20 @@ cli_dispatch() {
             local save_dir="/cert/${domain}"
             mkdir -p "$save_dir" 2>/dev/null
             local resp
-            resp=$(api_post_retry "${CERT_API}/download" "domain=${domain}&type=${dl_type}" \
-                "application/x-www-form-urlencoded")
+            resp=$(api_post_retry "${CERT_API}/download" domain "$domain" type "$dl_type")
             if [[ "$(json_status "$resp")" == "success" ]]; then
                 local content
                 content=$(json_get "$resp" "content")
                 [[ -z "$content" ]] && content=$(json_get "$resp" "certificate")
+                [[ -z "$content" ]] && content=$(json_get "$resp" "pem")
+                [[ -z "$content" ]] && content=$(json_get "$resp" "result")
+                if [[ -z "$content" ]] && echo "$resp" | grep -q "BEGIN"; then
+                    content="$resp"
+                fi
                 if [[ -n "$content" ]]; then
                     local fname="${dl_type}.pem"
                     printf '%b' "$content" > "${save_dir}/${fname}"
+                    [[ "$dl_type" == "privkey" ]] && chmod 600 "${save_dir}/${fname}"
                     ok "Saved: ${save_dir}/${fname}"
                 else
                     err "未获取到证书内容"
