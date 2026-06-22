@@ -250,17 +250,24 @@ json_data_raw() {
 }
 
 # Count objects in a JSON result array
+# Uses json_data_raw to scope counting to the result array only,
+# avoiding false matches from nested objects outside the array
 # Usage: json_data_count "$json"
 json_data_count() {
     local json="$1"
-    # Count occurrences of "id": as a proxy for object count
-    # Works for DNS records and cert arrays
-    local c
-    c=$(printf '%s' "$json" | grep -o '"id":' | wc -l)
+    local result_part c
+    result_part=$(json_data_raw "$json")
+    # Count occurrences of "id": within the result array
+    if [[ -n "$result_part" ]]; then
+        c=$(printf '%s' "$result_part" | grep -o '"id":' | wc -l)
+    else
+        c=0
+    fi
     c=$(echo "$c" | tr -d '[:space:]')
-    # Fallback: count { if no "id" fields
+    # Fallback: count "domain": if no "id" fields
     if [[ "$c" -eq 0 ]]; then
-        c=$(printf '%s' "$json" | grep -o '"domain":' | wc -l)
+        local haystack="${result_part:-$json}"
+        c=$(printf '%s' "$haystack" | grep -o '"domain":' | wc -l)
         c=$(echo "$c" | tr -d '[:space:]')
     fi
     echo "${c:-0}"
