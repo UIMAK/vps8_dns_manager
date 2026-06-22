@@ -349,15 +349,20 @@ json_message() {
 
 # Safely unescape JSON escape sequences — handles only \n \r \t \\ \"
 # Unlike printf '%b', does NOT interpret \0NNN, \xHH, \c (stop), etc.
+#
+# Pattern caveat: in ${var//pattern/replacement}, the pattern is parsed as a
+# glob after bash's double-quote backslash rules. Source `\\n` → bash parses
+# to literal `\n` (2 chars) → glob matches literal `\n`. Source `\\\\n` would
+# parse to literal `\\n` (3 chars) and only match 2 backslashes + n, which
+# the vps8 API never returns — that's why the previous 4-backslash form was a
+# silent no-op and PEM files ended up as a single line of literal `\n`.
 _json_unescape() {
     local s="$1"
-    # Order matters: \\ must be unescaped first, otherwise \n \r \t would
-    # incorrectly consume a backslash that was part of an escaped-backslash sequence
-    s="${s//\\\\\\\\/$'\\'}"
-    s="${s//\\\\n/$'\n'}"
-    s="${s//\\\\r/$'\r'}"
-    s="${s//\\\\t/$'\t'}"
-    s="${s//\\\\\"/\"}"
+    s="${s//\\\\/$'\\'}"
+    s="${s//\\n/$'\n'}"
+    s="${s//\\r/$'\r'}"
+    s="${s//\\t/$'\t'}"
+    s="${s//\\\"/\"}"
     echo "$s"
 }
 
