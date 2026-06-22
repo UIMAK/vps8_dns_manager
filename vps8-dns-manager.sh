@@ -687,7 +687,7 @@ dns_delete_record() {
 ###############################################################################
 # DDNS Operations
 ###############################################################################
-readonly DDNS_DIR="${HOME}/.vps8-ddns"
+readonly DDNS_DIR="${CONFIG_DIR}/ddns"
 readonly DDNS_RULES="${DDNS_DIR}/rules.list"
 readonly DDNS_LOG="${DDNS_DIR}/ddns.log"
 readonly DDNS_UPDATE="${DDNS_DIR}/update.sh"
