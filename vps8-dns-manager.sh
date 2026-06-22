@@ -338,16 +338,18 @@ config_save_key() {
 # API Layer
 ###############################################################################
 
-# Generic POST with Basic Auth
-# api_post <url> <body> [content_type]
+# Generic POST with Basic Auth + form-encoded data
+# Usage: api_post <url> [key value] [key value] ...
 api_post() {
-    local url="$1" body="${2:-{}}" ctype="${3:-application/json}"
+    local url="$1"; shift
+    local -a curl_args=(-sS -w '\n__HTTP_%{http_code}__' -u "client:${API_KEY}")
+    while [[ $# -ge 2 ]]; do
+        curl_args+=(--data-urlencode "${1}=${2}")
+        shift 2
+    done
 
     local resp http_code
-    resp=$(curl -sS -w '\n__HTTP_%{http_code}__' \
-        -u "client:${API_KEY}" \
-        -H "Content-Type: $ctype" \
-        -X POST "$url" -d "$body" 2>&1)
+    resp=$(curl "${curl_args[@]}" "$url" 2>&1)
     local rc=$?
 
     if (( rc != 0 )); then
@@ -367,12 +369,14 @@ api_post() {
     esac
 }
 
-# POST with retry (for important operations)
+# POST with retry
+# Usage: api_post_retry <url> [key value] [key value] ...
 api_post_retry() {
-    local url="$1" body="${2:-{}}" ctype="${3:-application/json}"
+    local url="$1"; shift
+    local -a args=("$@")
     local max_retries=3 resp
     for ((i=1; i<=max_retries; i++)); do
-        resp=$(api_post "$url" "$body" "$ctype")
+        resp=$(api_post "$url" "${args[@]}")
         local st
         st=$(json_status "$resp")
         if [[ "$st" == "success" ]]; then
@@ -429,7 +433,7 @@ dns_list_domains() {
     echo ""; _section "DNS 域名列表"; echo ""
 
     local resp
-    resp=$(api_post "${DNS_API}/domain_list" '{}')
+    resp=$(api_post "${DNS_API}/domain_list")
     local st msg
     st=$(json_status "$resp")
 
@@ -476,7 +480,7 @@ dns_list_records() {
     if ! is_domain "$domain"; then err "无效域名: $domain"; return 1; fi
 
     local resp
-    resp=$(api_post "${DNS_API}/record_list" "{\"domain\":\"${domain}\"}")
+    resp=$(api_post "${DNS_API}/record_list" domain "$domain")
     local st msg
     st=$(json_status "$resp")
 
@@ -556,12 +560,9 @@ dns_create_record() {
     echo ""
     confirm "确认创建?" "y" || { info "已取消"; return 0; }
 
-    local body
-    body=$(printf '{"domain":"%s","host":"%s","type":"%s","value":"%s","ttl":%s}' \
-        "$domain" "$host" "$rtype" "$value" "$ttl")
-
     local resp
-    resp=$(api_post "${DNS_API}/record_create" "$body")
+    resp=$(api_post "${DNS_API}/record_create" \
+        domain "$domain" host "$host" type "$rtype" value "$value" ttl "$ttl")
     local st msg
     st=$(json_status "$resp")
 
@@ -590,12 +591,9 @@ dns_update_record() {
     ttl=$(ask "TTL (秒)" "600")
     is_number "$ttl" || ttl=600
 
-    local body
-    body=$(printf '{"domain":"%s","id":%s,"value":"%s","ttl":%s}' \
-        "$domain" "$record_id" "$value" "$ttl")
-
     local resp
-    resp=$(api_post "${DNS_API}/record_update" "$body")
+    resp=$(api_post "${DNS_API}/record_update" \
+        domain "$domain" id "$record_id" value "$value" ttl "$ttl")
     local st msg
     st=$(json_status "$resp")
 
@@ -623,11 +621,8 @@ dns_delete_record() {
     warn "即将删除记录: 域名=${domain}, ID=${record_id}"
     confirm "确认删除? 此操作不可恢复" "n" || { info "已取消"; return 0; }
 
-    local body
-    body=$(printf '{"domain":"%s","id":%s}' "$domain" "$record_id")
-
     local resp
-    resp=$(api_post "${DNS_API}/record_delete" "$body")
+    resp=$(api_post "${DNS_API}/record_delete" domain "$domain" id "$record_id")
     local st msg
     st=$(json_status "$resp")
 
@@ -701,12 +696,10 @@ ddns_update() {
     echo ""
     confirm "确认更新?" "y" || { info "已取消"; return 0; }
 
-    local body
-    body=$(printf '{"domain":"%s","record_name":"%s","record_type":"%s","record_value":"%s","ttl":%s}' \
-        "$domain" "$record_name" "$record_type" "$record_value" "$ttl")
-
     local resp
-    resp=$(api_post "${DDNS_API}/ddns_update" "$body")
+    resp=$(api_post "${DDNS_API}/ddns_update" \
+        domain "$domain" record_name "$record_name" record_type "$record_type" \
+        record_value "$record_value" ttl "$ttl")
     local st msg
     st=$(json_status "$resp")
 
@@ -730,7 +723,7 @@ cert_list() {
     is_domain "$domain" || { err "无效域名"; return 1; }
 
     local resp
-    resp=$(api_post "${CERT_API}/list" "domain=${domain}" "application/x-www-form-urlencoded")
+    resp=$(api_post "${CERT_API}/list" domain "$domain")
     local st msg
     st=$(json_status "$resp")
 
@@ -833,8 +826,7 @@ cert_download() {
 
     info "正在下载 ${dl_type}..."
     local resp
-    resp=$(api_post_retry "${CERT_API}/download" "domain=${domain}&type=${dl_type}" \
-        "application/x-www-form-urlencoded")
+    resp=$(api_post_retry "${CERT_API}/download" domain "$domain" type "$dl_type")
     local st msg
     st=$(json_status "$resp")
 
@@ -894,8 +886,7 @@ cert_renew() {
 
     info "正在发起续签请求..."
     local resp
-    resp=$(api_post_retry "${CERT_API}/renew" "domain=${domain}" \
-        "application/x-www-form-urlencoded")
+    resp=$(api_post_retry "${CERT_API}/renew" domain "$domain")
     local st msg
     st=$(json_status "$resp")
 
@@ -1036,7 +1027,7 @@ cli_dispatch() {
             local domain="$1"
             if ! is_domain "$domain"; then err "无效域名: $domain"; return 1; fi
             local resp
-            resp=$(api_post "${DNS_API}/record_list" "{\"domain\":\"${domain}\"}")
+            resp=$(api_post "${DNS_API}/record_list" domain "$domain")
             local st
             st=$(json_status "$resp")
             if [[ "$st" != "success" ]]; then
@@ -1149,7 +1140,7 @@ cli_dispatch() {
             local domain="$1"
             is_domain "$domain" || { err "无效域名"; return 1; }
             local resp
-            resp=$(api_post "${CERT_API}/list" "domain=${domain}" "application/x-www-form-urlencoded")
+            resp=$(api_post "${CERT_API}/list" domain "$domain")
             if [[ "$(json_status "$resp")" == "success" ]]; then
                 printf "%s\n" "$resp"
             else
