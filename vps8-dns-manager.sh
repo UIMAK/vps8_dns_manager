@@ -359,29 +359,30 @@ _api_error() {
 # Usage: api_post <url> [key value] [key value] ...
 api_post() {
     local url="$1"; shift
-    local -a curl_args=(-sS -w '\n__HTTP_%{http_code}__' -u "client:${API_KEY}")
+    local -a curl_args=(-sS -u "client:${API_KEY}")
     while [[ $# -ge 2 ]]; do
         curl_args+=(--data-urlencode "${1}=${2}")
         shift 2
     done
 
-    local resp http_code
-    resp=$(curl "${curl_args[@]}" "$url" 2>&1)
-    local rc=$?
+    # Use -o for body file, -w for http_code on stdout — clean separation
+    local body_file http_code resp rc
+    body_file=$(mktemp)
+    http_code=$(curl "${curl_args[@]}" -o "$body_file" -w '%{http_code}' "$url" 2>/dev/null)
+    rc=$?
+    resp=$(cat "$body_file" 2>/dev/null)
+    rm -f "$body_file"
 
     if (( rc != 0 )); then
-        _log ERROR "curl failed ($rc): $resp"
-        echo "{\"status\":\"error\",\"message\":\"网络请求失败: $resp\"}"
+        _log ERROR "curl failed ($rc), http=$http_code"
+        echo "{\"status\":\"error\",\"message\":\"网络请求失败 (curl exit $rc)\"}"
         return 1
     fi
 
-    http_code=$(echo "$resp" | grep -o '__HTTP_[0-9]*__' | grep -o '[0-9]*')
-    resp=$(echo "$resp" | sed '/__HTTP_[0-9]*__/d')
-
-    case "${http_code:-0}" in
+    case "${http_code}" in
         429) echo "{\"status\":\"error\",\"message\":\"请求过于频繁 (HTTP 429)，请稍后再试\"}" ;;
         401|403) echo "{\"status\":\"error\",\"message\":\"认证失败: API Key 无效或已过期 (HTTP ${http_code})\"}" ;;
-        0) echo "{\"status\":\"error\",\"message\":\"无法连接服务器，请检查网络\"}" ;;
+        000|"") echo "{\"status\":\"error\",\"message\":\"无法连接服务器，请检查网络\"}" ;;
         *) echo "$resp" ;;
     esac
 }
