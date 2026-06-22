@@ -344,6 +344,51 @@ json_message() {
 }
 
 ###############################################################################
+# String Helpers
+###############################################################################
+
+# Safely unescape JSON escape sequences — handles only \n \r \t \\ \"
+# Unlike printf '%b', does NOT interpret \0NNN, \xHH, \c (stop), etc.
+_json_unescape() {
+    local s="$1"
+    # Order matters: \\ must be unescaped first, otherwise \n \r \t would
+    # incorrectly consume a backslash that was part of an escaped-backslash sequence
+    s="${s//\\\\\\\\/$'\\'}"
+    s="${s//\\\\n/$'\n'}"
+    s="${s//\\\\r/$'\r'}"
+    s="${s//\\\\t/$'\t'}"
+    s="${s//\\\\\"/\"}"
+    echo "$s"
+}
+
+# Extract PEM certificate content from API response
+# Tries multiple field names, falls back to raw response if it contains BEGIN marker
+_extract_pem_content() {
+    local resp="$1" content
+    content=$(json_get "$resp" "content")
+    [[ -z "$content" ]] && content=$(json_get "$resp" "certificate")
+    [[ -z "$content" ]] && content=$(json_get "$resp" "pem")
+    [[ -z "$content" ]] && content=$(json_get "$resp" "result")
+    if [[ -z "$content" ]] && echo "$resp" | grep -q "BEGIN"; then
+        content="$resp"
+    fi
+    echo "$content"
+}
+
+# Atomically write certificate file — write to .tmp then mv (prevents partial reads)
+_write_cert_file() {
+    local path="$1" content="$2" is_private="${3:-0}"
+    local tmp_out="${path}.tmp"
+    printf '%s' "$content" > "$tmp_out"
+    if [[ "$is_private" -eq 1 ]]; then
+        chmod 600 "$tmp_out"
+    else
+        chmod 644 "$tmp_out"
+    fi
+    mv "$tmp_out" "$path"
+}
+
+###############################################################################
 # Configuration
 ###############################################################################
 _ensure_config() {
