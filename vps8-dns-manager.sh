@@ -847,18 +847,18 @@ _ddns_install() {
     # Write/update rules.list (domain|type|hosts|ttl|ip_source)
     local rule="${domain}|${rtype}|${hosts}|${ttl}|${ip_source}"
     if [[ -f "$DDNS_RULES" ]]; then
-        # Remove existing rule for same domain+type
-        local existing
-        existing=$(grep -v "^${domain}|${rtype}|" "$DDNS_RULES" 2>/dev/null || true)
+        # Remove existing rule for same domain+type (escape dots for regex)
+        local existing escaped_domain
+        escaped_domain="${domain//./\\.}"
+        existing=$(grep -v "^${escaped_domain}|${rtype}|" "$DDNS_RULES" 2>/dev/null || true)
         printf '%s\n%s\n' "$existing" "$rule" > "$DDNS_RULES"
     else
         echo "$rule" > "$DDNS_RULES"
     fi
     chmod 600 "$DDNS_RULES"
 
-    # Write config.env
+    # Write config.env (API_URL only — API_KEY read from main config at runtime)
     cat > "${DDNS_DIR}/config.env" <<CONF
-API_KEY="${API_KEY}"
 API_URL="${API_BASE}"
 CONF
     chmod 600 "${DDNS_DIR}/config.env"
@@ -913,16 +913,26 @@ _ddns_generate_update_script() {
 #!/usr/bin/env bash
 set -uo pipefail
 
+# Clean up temp files on exit/signal
+_cleanup_ddns() { rm -f "$TMP" "$NETRC" 2>/dev/null; }
+trap _cleanup_ddns EXIT INT TERM
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="$SCRIPT_DIR/config.env"
 RULES="$SCRIPT_DIR/rules.list"
 LOG="$SCRIPT_DIR/ddns.log"
+MAIN_CONFIG="${HOME}/.vps8-dns-manager/config"
 
 [[ -f "$CONFIG" ]] || { echo "$(date): config.env missing" >> "$LOG"; exit 1; }
 [[ -f "$RULES" ]] || { echo "$(date): rules.list missing" >> "$LOG"; exit 1; }
 
 # shellcheck source=/dev/null
 source "$CONFIG"
+
+# Read API_KEY from main config — avoids storing a duplicate copy
+API_KEY=$(grep '^API_KEY=' "$MAIN_CONFIG" 2>/dev/null | head -1 | cut -d= -f2-)
+[[ -z "$API_KEY" ]] && { echo "$(date): API_KEY not found in main config" >> "$LOG"; exit 1; }
+export API_KEY
 
 log_line() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 
@@ -969,7 +979,7 @@ while IFS='|' read -r DOMAIN TYPE HOSTS TTL IP_SOURCE; do
         fi
     fi
 
-    IFS=', ' read -r -a HOST_ARRAY <<< "$HOSTS"
+    IFS=',' read -r -a HOST_ARRAY <<< "$HOSTS"
     CURL_IP_OPTS=()
     if [[ "$IP_SOURCE" == "source" ]]; then
         [[ "$TYPE" == "AAAA" ]] && CURL_IP_OPTS+=("-6") || CURL_IP_OPTS+=("-4")
@@ -988,13 +998,16 @@ while IFS='|' read -r DOMAIN TYPE HOSTS TTL IP_SOURCE; do
         fi
 
         TMP="$(mktemp)"
+        NETRC="$(mktemp)"
+        printf 'machine %s login client password %s\n' "${API_URL#https://}" "$API_KEY" > "$NETRC"
+        chmod 600 "$NETRC"
         HTTP_CODE=$(curl "${CURL_IP_OPTS[@]}" -sS --max-time 20 \
-            -u "client:${API_KEY}" \
+            --netrc-file "$NETRC" \
             -H "Content-Type: application/json" \
             -X POST "${API_URL}/api/client/servicedns/ddns_update" \
             -d "$PAYLOAD" -o "$TMP" -w '%{http_code}' 2>/dev/null) || true
         BODY="$(cat "$TMP" 2>/dev/null || true)"
-        rm -f "$TMP"
+        rm -f "$TMP" "$NETRC"
 
         if [[ "$HTTP_CODE" == "200" ]] && echo "$BODY" | grep -q '"error":null'; then
             log_line "OK domain=$DOMAIN host=$host type=$TYPE ip_source=$IP_SOURCE ip=${CURRENT_IP:-source}"
@@ -1592,14 +1605,19 @@ cli_dispatch() {
             local payload
             payload=$(printf '{"domain":"%s","record_name":"%s","record_type":"%s","ttl":%s}' \
                 "$domain" "$rname" "$rtype" "$ttl")
-            local tmp http_code body
+            local tmp netrc http_code body
             tmp=$(mktemp)
+            _register_temp "$tmp"
+            netrc=$(mktemp)
+            _register_temp "$netrc"
+            printf 'machine %s login client password %s\n' "${API_BASE#https://}" "$API_KEY" > "$netrc"
+            chmod 600 "$netrc"
             http_code=$(curl "${curl_opts[@]}" -sS --max-time 20 \
-                -u "client:${API_KEY}" -H "Content-Type: application/json" \
+                --netrc-file "$netrc" -H "Content-Type: application/json" \
                 -X POST "${DDNS_API}/ddns_update" \
                 -d "$payload" -o "$tmp" -w '%{http_code}' 2>/dev/null) || true
             body=$(cat "$tmp" 2>/dev/null || true)
-            rm -f "$tmp"
+            rm -f "$tmp" "$netrc"
             if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"error":null'; then
                 ok "DDNS: ${rname}.${domain} updated (${rtype}, source IP)"
             else
