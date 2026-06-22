@@ -1704,9 +1704,25 @@ cli_dispatch() {
 
         # Settings
         set-key)
-            [[ $# -lt 1 ]] && { err "用法: set-key <api_key>"; return 1; }
-            config_save_key "$1"
-            ok "API Key 已保存"
+            local new_key
+            if [[ ! -t 0 ]]; then
+                # Read from pipe: echo 'KEY' | script set-key (no shell history)
+                read -r new_key
+            elif [[ $# -ge 1 ]]; then
+                warn "出于安全考虑，建议通过管道输入 API Key"
+                info "用法: echo 'YOUR_KEY' | ./vps8-dns-manager.sh set-key"
+                info "或在交互模式下通过设置菜单配置（不记录到历史）"
+                new_key="$1"
+            else
+                new_key=$(ask_secure "请输入 API Key")
+            fi
+            if [[ -n "$new_key" ]]; then
+                config_save_key "$new_key"
+                ok "API Key 已保存"
+            else
+                err "未提供 API Key"
+                return 1
+            fi
             ;;
         status)
             settings_view ;;

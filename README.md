@@ -15,7 +15,7 @@
 
 ### 证书管理
 - 查询证书状态与到期时间
-- 下载证书（fullchain / cert / privkey / bundle）
+- 下载证书（fullchain / cert / privkey）
 - 发起证书续签
 
 ### 交互体验
@@ -57,16 +57,24 @@ bash vps8-dns-manager.sh update example.com 12345 5.6.7.8 600  # 更新记录
 bash vps8-dns-manager.sh delete example.com 12345         # 删除记录
 
 # DDNS
-bash vps8-dns-manager.sh ddns example.com A               # 自动检测IP
-bash vps8-dns-manager.sh ddns example.com A 203.0.113.5   # 指定IP
+bash vps8-dns-manager.sh ddns example.com A               # 自动检测IP (source 模式)
+bash vps8-dns-manager.sh ddns example.com A @ 300         # 指定主机记录和 TTL
 
 # 证书管理
 bash vps8-dns-manager.sh cert-list example.com            # 查询证书
 bash vps8-dns-manager.sh cert-download example.com fullchain  # 下载证书
 bash vps8-dns-manager.sh cert-renew example.com           # 续签证书
+bash vps8-dns-manager.sh cert-sync                        # 同步所有已下载证书
+bash vps8-dns-manager.sh cert-sync example.com            # 同步指定域名证书
+
+# 系统
+bash vps8-dns-manager.sh install                          # 安装脚本到 ~/.vps8-dns-manager/
+bash vps8-dns-manager.sh update                           # 从 GitHub 更新
+bash vps8-dns-manager.sh status                           # 查看状态信息
+bash vps8-dns-manager.sh version                          # 显示版本
 
 # 设置
-bash vps8-dns-manager.sh set-key YOUR_API_KEY             # 配置 API Key
+bash vps8-dns-manager.sh set-key YOUR_API_KEY             # 配置 API Key (建议管道输入)
 bash vps8-dns-manager.sh help                             # 帮助
 ```
 
@@ -85,7 +93,7 @@ bash vps8-dns-manager.sh help                             # 帮助
 API_KEY=your_api_key_here
 ```
 
-证书下载保存至脚本目录下的 `certs/<域名>/` 文件夹。
+证书下载保存至 `/cert/<域名>/` 文件夹。
 
 ## 依赖
 
