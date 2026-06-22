@@ -182,16 +182,16 @@ json_get() {
     echo "$val"
 }
 
-# Extract the "data" field content from JSON response
-# Returns the raw content between data: [ ... ] or data: { ... }
+# Extract the "result" field content from JSON response
+# Returns the raw content between result: [ ... ] or result: { ... }
 json_data_raw() {
     local json="$1"
     # Try array first
     local arr
     arr=$(printf '%s' "$json" | awk '{
-        idx = index($0, "\"data\"")
+        idx = index($0, "\"result\"")
         if (idx > 0) {
-            rest = substr($0, idx + 6)
+            rest = substr($0, idx + 8)
             sub(/^[[:space:]]*:[[:space:]]*/, "", rest)
             if (substr(rest, 1, 1) == "[") {
                 sub(/^\[/, "", rest)
@@ -279,13 +279,13 @@ json_data_field() {
     }'
 }
 
-# Check if data is an array or object
+# Check if result is an array or object
 json_data_type() {
     local json="$1"
     printf '%s' "$json" | awk '{
-        idx = index($0, "\"data\"")
+        idx = index($0, "\"result\"")
         if (idx > 0) {
-            rest = substr($0, idx + 6)
+            rest = substr($0, idx + 8)
             sub(/^[[:space:]]*:[[:space:]]*/, "", rest)
             if (substr(rest,1,1) == "[") print "array"
             else if (substr(rest,1,1) == "{") print "object"
@@ -294,12 +294,22 @@ json_data_type() {
     }'
 }
 
-# Get top-level status/message from response
-json_status() { json_get "$1" "status"; }
+# Get top-level status: "success" if error is null, else "error"
+json_status() {
+    local err_val
+    err_val=$(json_get "$1" "error")
+    if [[ -z "$err_val" || "$err_val" == "null" ]]; then
+        echo "success"
+    else
+        echo "error"
+    fi
+}
+
+# Get error message from response
 json_message() {
     local msg
-    msg=$(json_get "$1" "message")
-    [[ -z "$msg" ]] && msg=$(json_get "$1" "msg")
+    msg=$(json_get "$1" "error")
+    [[ "$msg" == "null" ]] && msg=""
     echo "$msg"
 }
 
@@ -750,23 +760,24 @@ cert_list() {
 
     # Handle single object response
     if [[ "$dtype" == "object" ]]; then
-        local id issuer expiry cert_status
-        id=$(json_get "$resp" "id")
-        issuer=$(json_get "$resp" "issuer")
-        [[ -z "$issuer" ]] && issuer=$(json_get "$resp" "ca")
-        expiry=$(json_get "$resp" "expiry")
-        [[ -z "$expiry" ]] && expiry=$(json_get "$resp" "expire")
-        [[ -z "$expiry" ]] && expiry=$(json_get "$resp" "not_after")
+        local id domain_cn expiry cert_status state
+        id=$(json_get "$resp" "cert_id")
+        [[ -z "$id" ]] && id=$(json_get "$resp" "id")
+        domain_cn=$(json_get "$resp" "common_name")
+        [[ -z "$domain_cn" ]] && domain_cn=$(json_get "$resp" "domain")
+        expiry=$(json_get "$resp" "not_after")
+        [[ -z "$expiry" ]] && expiry=$(json_get "$resp" "expiry")
         cert_status=$(json_get "$resp" "status")
+        state=$(json_get "$resp" "state")
 
         sep
-        printf "  ${BOLD}%-12s %-20s %-22s %-10s${NC}\n" "ID" "签发者" "到期时间" "状态"
+        printf "  ${BOLD}%-8s %-30s %-22s %-10s${NC}\n" "ID" "域名" "到期时间" "状态"
         sep
         local sc="${GREEN}"
-        [[ "$cert_status" == "expired" ]] && sc="${RED}"
-        [[ "$cert_status" == "pending" ]] && sc="${YELLOW}"
-        printf "  %-12s %-20s %-22s ${sc}%-10s${NC}\n" \
-            "${id:-N/A}" "${issuer:-N/A}" "${expiry:-N/A}" "${cert_status:-N/A}"
+        [[ "$cert_status" == "expired" || "$state" == "expired" ]] && sc="${RED}"
+        [[ "$cert_status" == "pending" || "$state" == "pending" ]] && sc="${YELLOW}"
+        printf "  %-8s %-30s %-22s ${sc}%-10s${NC}\n" \
+            "${id:-N/A}" "${domain_cn:-N/A}" "${expiry:-N/A}" "${cert_status:-${state:-N/A}}"
         sep
         return 0
     fi
@@ -777,31 +788,32 @@ cert_list() {
     fi
 
     # Parse array
-    local -a c_ids=() c_issuers=() c_expiries=() c_statuses=()
+    local -a c_ids=() c_domains=() c_expiries=() c_statuses=()
     for ((i=0; i<count; i++)); do
-        local id issuer expiry cs
-        id=$(json_data_field "$resp" "$i" "id")
-        issuer=$(json_data_field "$resp" "$i" "issuer")
-        [[ -z "$issuer" ]] && issuer=$(json_data_field "$resp" "$i" "ca")
-        expiry=$(json_data_field "$resp" "$i" "expiry")
-        [[ -z "$expiry" ]] && expiry=$(json_data_field "$resp" "$i" "expire")
-        [[ -z "$expiry" ]] && expiry=$(json_data_field "$resp" "$i" "not_after")
+        local id domain_cn expiry cs
+        id=$(json_data_field "$resp" "$i" "cert_id")
+        [[ -z "$id" ]] && id=$(json_data_field "$resp" "$i" "id")
+        domain_cn=$(json_data_field "$resp" "$i" "common_name")
+        [[ -z "$domain_cn" ]] && domain_cn=$(json_data_field "$resp" "$i" "domain")
+        expiry=$(json_data_field "$resp" "$i" "not_after")
+        [[ -z "$expiry" ]] && expiry=$(json_data_field "$resp" "$i" "expiry")
         cs=$(json_data_field "$resp" "$i" "status")
+        [[ -z "$cs" ]] && cs=$(json_data_field "$resp" "$i" "state")
         c_ids+=("${id:-N/A}")
-        c_issuers+=("${issuer:-N/A}")
+        c_domains+=("${domain_cn:-N/A}")
         c_expiries+=("${expiry:-N/A}")
         c_statuses+=("${cs:-N/A}")
     done
 
     sep
-    printf "  ${BOLD}%-12s %-20s %-22s %-10s${NC}\n" "ID" "签发者" "到期时间" "状态"
+    printf "  ${BOLD}%-8s %-30s %-22s %-10s${NC}\n" "ID" "域名" "到期时间" "状态"
     sep
     for ((i=0; i<${#c_ids[@]}; i++)); do
         local sc="${GREEN}"
         [[ "${c_statuses[$i]}" == "expired" ]] && sc="${RED}"
         [[ "${c_statuses[$i]}" == "pending" ]] && sc="${YELLOW}"
-        printf "  %-12s %-20s %-22s ${sc}%-10s${NC}\n" \
-            "${c_ids[$i]}" "${c_issuers[$i]}" "${c_expiries[$i]}" "${c_statuses[$i]}"
+        printf "  %-8s %-30s %-22s ${sc}%-10s${NC}\n" \
+            "${c_ids[$i]}" "${c_domains[$i]}" "${c_expiries[$i]}" "${c_statuses[$i]}"
     done
     sep
     info "共 ${#c_ids[@]} 个证书"
