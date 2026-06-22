@@ -20,5 +20,6 @@ Desktop.ini
 tests/
 .claude/
 .trellis
+.opencode/
 CLAUDE.md
 AGENTS.md

@@ -1,87 +1,131 @@
-# vps8 CertCenter 证书管理脚本
+# vps8 DNS Manager
 
-自动管理 [vps8 CertCenter](https://vps8.zz.cd/certcenter) 证书的交互式 Bash 脚本。
+一站式管理 [vps8](https://vps8.zz.cd) 的 DNS 记录、SSL 证书和 DDNS 的交互式 Bash 工具。
 
 ## 功能
 
-- 交互式菜单，首次运行输入 API Key 后自动保存
-- 查询证书到期时间
-- 下载证书到 `/cert/<域名>/`
-- 手动发起续签
-- 一键设置定时自动续签（每天北京时间 01:00）
-- 管理已保存的域名及定时任务
-- 一键卸载（保留 `/cert` 目录）
+### DNS 记录管理
+- 列出所有 DNS 域名
+- 查询指定域名的 DNS 记录
+- 创建 / 更新 / 删除 DNS 记录（支持 A、AAAA、MX、CNAME、TXT、NS）
+
+### DDNS 动态 IP 更新
+- 一键 DDNS 更新，自动检测公网 IP
+- 支持 A (IPv4) 和 AAAA (IPv6) 记录
+
+### 证书管理
+- 查询证书状态与到期时间
+- 下载证书（fullchain / cert / privkey / bundle）
+- 发起证书续签
+
+### 交互体验
+- 彩色终端界面，结构化菜单
+- 表格化数据展示
+- 输入验证与安全确认
+- CLI 模式支持脚本化调用与 crontab
 
 ## 快速开始
 
-只需下载一个文件：
+```bash
+curl -O https://raw.githubusercontent.com/UIMAK/vps8_dns_manager/main/vps8-dns-manager.sh
+chmod +x vps8-dns-manager.sh
+bash vps8-dns-manager.sh
+```
+
+首次运行会提示配置 API Key（在 [vps8 个人资料页](https://vps8.zz.cd/client/profile) 获取）。
+
+## 使用方式
+
+### 交互模式（默认）
+
+直接运行脚本，通过数字菜单选择操作：
 
 ```bash
-curl -O https://raw.githubusercontent.com/YOUIMARK/vps8_cert_manager/refs/heads/main/cert_manager.sh
-chmod +x cert_manager.sh
-bash cert_manager.sh
+bash vps8-dns-manager.sh
 ```
 
-首次运行会自动：
-1. 创建 `~/vps8_cert_manager/` 目录
-2. 将脚本复制到该目录并删除原文件
-3. 生成 `cert_cron.sh`（供定时任务调用）
-4. 提示输入 API Key（在 [个人资料页](https://vps8.zz.cd/client/profile) 获取）
+### CLI 模式
 
-之后运行：
+适合脚本调用或 crontab：
 
 ```bash
-bash ~/vps8_cert_manager/cert_manager.sh
+# DNS 管理
+bash vps8-dns-manager.sh domains                          # 列出域名
+bash vps8-dns-manager.sh records example.com              # 查询记录
+bash vps8-dns-manager.sh create example.com www A 1.2.3.4 600  # 创建记录
+bash vps8-dns-manager.sh update example.com 12345 5.6.7.8 600  # 更新记录
+bash vps8-dns-manager.sh delete example.com 12345         # 删除记录
+
+# DDNS
+bash vps8-dns-manager.sh ddns example.com A               # 自动检测IP
+bash vps8-dns-manager.sh ddns example.com A 203.0.113.5   # 指定IP
+
+# 证书管理
+bash vps8-dns-manager.sh cert-list example.com            # 查询证书
+bash vps8-dns-manager.sh cert-download example.com fullchain  # 下载证书
+bash vps8-dns-manager.sh cert-renew example.com           # 续签证书
+
+# 设置
+bash vps8-dns-manager.sh set-key YOUR_API_KEY             # 配置 API Key
+bash vps8-dns-manager.sh help                             # 帮助
 ```
 
-## 目录结构
+### DDNS 定时任务
 
-```
-~/vps8_cert_manager/
-├── cert_manager.sh    # 主脚本（自动安装）
-├── cert_cron.sh       # 自动生成，供 crontab 调用
-├── config.conf        # API Key 及域名列表（权限 600）
-└── logs/
-    └── cert_manager.log
+```bash
+# 每 5 分钟更新一次 DDNS
+*/5 * * * * /path/to/vps8-dns-manager.sh ddns example.com A
 ```
 
-证书存放位置：
+## 配置文件
+
+配置保存在 `~/.vps8-dns-manager/config`（权限 600）：
 
 ```
-/cert/
-└── example.com/
-    ├── fullchain.pem  (644)
-    ├── cert.pem       (644)
-    └── privkey.pem    (600)
+API_KEY=your_api_key_here
 ```
 
-## 支持的系统
-
-| 发行版 | 包管理器 | 状态 |
-|--------|----------|------|
-| Debian / Ubuntu | apt | ✅ |
-| CentOS / RHEL 7 | yum | ✅ |
-| CentOS / RHEL 8+ / Fedora | dnf | ✅ |
-| Alpine Linux | apk | ✅（需安装 bash） |
-| Arch Linux | pacman | ✅ |
-| openSUSE | zypper | ✅ |
+证书下载保存至脚本目录下的 `certs/<域名>/` 文件夹。
 
 ## 依赖
 
 - `bash` ≥ 4.0
 - `curl`
-- `grep` / `sed`（兼容 GNU、BusyBox 和 BSD 版本）
-- `python3`（推荐，用于 JSON 解析；无则降级 sed，不影响功能）
+- `grep` / `sed` / `awk`（兼容 GNU、BusyBox、BSD）
 
-## 卸载
+无需安装 `jq` 或 `python3`，JSON 解析完全内置。
 
-在菜单中选择「5. 卸载脚本」，将删除 `~/vps8_cert_manager` 目录及所有相关 crontab 条目。
+## 支持的系统
 
-证书文件不会被删除。如需手动删除：
+| 发行版 | 状态 |
+|--------|------|
+| Debian / Ubuntu | ✅ |
+| CentOS / RHEL / Fedora | ✅ |
+| Alpine Linux | ✅ (需 bash) |
+| Arch Linux | ✅ |
+| openSUSE | ✅ |
+| macOS | ✅ |
 
-```bash
-rm -rf /cert
-```
+## API 参考
+
+| 接口 | 用途 |
+|------|------|
+| `POST /api/client/dnsopenapi/domain_list` | 列出 DNS 域名 |
+| `POST /api/client/dnsopenapi/record_list` | 列出 DNS 记录 |
+| `POST /api/client/dnsopenapi/record_create` | 创建 DNS 记录 |
+| `POST /api/client/dnsopenapi/record_update` | 更新 DNS 记录 |
+| `POST /api/client/dnsopenapi/record_delete` | 删除 DNS 记录 |
+| `POST /api/client/certcenter/list` | 查询证书 |
+| `POST /api/client/certcenter/download` | 下载证书 |
+| `POST /api/client/certcenter/renew` | 续签证书 |
+| `POST /api/client/servicedns/ddns_update` | DDNS 更新 |
+
+认证方式：HTTP Basic Auth (`client` : `API_KEY`)
+
+## 相关链接
+
+- 官网: https://vps8.zz.cd
+- 状态页: https://status.i8.al/status/vps8
 
 ## License
 
