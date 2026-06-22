@@ -409,11 +409,27 @@ config_load() {
 config_save_key() {
     _ensure_config
     local key="$1"
-    if [[ -f "$CONFIG_FILE" ]] && grep -q '^API_KEY=' "$CONFIG_FILE"; then
-        sed -i "s|^API_KEY=.*|API_KEY=${key}|" "$CONFIG_FILE"
-    else
-        echo "API_KEY=${key}" >> "$CONFIG_FILE"
+    # Reject keys with newlines (config injection vector)
+    if [[ "$key" =~ $'\n' ]]; then
+        err "API Key 包含非法字符"
+        return 1
     fi
+    # Safe rewrite via temp file — avoids sed injection with special chars
+    local tmp_conf replaced=0
+    tmp_conf=$(mktemp)
+    _register_temp "$tmp_conf"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" =~ ^API_KEY= ]]; then
+                printf 'API_KEY=%s\n' "$key"
+                replaced=1
+            else
+                printf '%s\n' "$line"
+            fi
+        done < "$CONFIG_FILE" > "$tmp_conf"
+    fi
+    [[ "$replaced" -eq 0 ]] && printf 'API_KEY=%s\n' "$key" >> "$tmp_conf"
+    mv "$tmp_conf" "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
     API_KEY="$key"
     export API_KEY
@@ -467,19 +483,29 @@ _api_error() {
         err "$msg"
     else
         err "$default_msg"
-        # Show truncated raw response for debugging
+        # Show truncated raw response for debugging (redact PEM content)
         local raw="${resp:0:300}"
         if [[ -n "$raw" ]]; then
-            info "原始响应: $raw"
+            if echo "$raw" | grep -q "BEGIN CERTIFICATE"; then
+                info "原始响应: [PEM 内容已隐藏]"
+            else
+                info "原始响应: $raw"
+            fi
         fi
     fi
 }
 
 # Generic POST with Basic Auth + form-encoded data
 # Usage: api_post <url> [key value] [key value] ...
+# Uses --netrc-file to avoid exposing API key in process list
 api_post() {
     local url="$1"; shift
-    local -a curl_args=(-sS -u "client:${API_KEY}")
+    local netrc_file
+    netrc_file=$(mktemp)
+    _register_temp "$netrc_file"
+    printf 'machine %s login client password %s\n' "${API_BASE#https://}" "$API_KEY" > "$netrc_file"
+    chmod 600 "$netrc_file"
+    local -a curl_args=(-sS --netrc-file "$netrc_file")
     while [[ $# -ge 2 ]]; do
         curl_args+=(--data-urlencode "${1}=${2}")
         shift 2
@@ -488,21 +514,22 @@ api_post() {
     # Use -o for body file, -w for http_code on stdout — clean separation
     local body_file http_code resp rc
     body_file=$(mktemp)
+    _register_temp "$body_file"
     http_code=$(curl "${curl_args[@]}" -o "$body_file" -w '%{http_code}' "$url" 2>/dev/null)
     rc=$?
     resp=$(cat "$body_file" 2>/dev/null)
-    rm -f "$body_file"
+    rm -f "$body_file" "$netrc_file"
 
     if (( rc != 0 )); then
         _log ERROR "curl failed ($rc), http=$http_code"
-        echo "{\"status\":\"error\",\"message\":\"网络请求失败 (curl exit $rc)\"}"
+        echo "{\"result\":null,\"error\":\"网络请求失败 (curl exit $rc)\"}"
         return 1
     fi
 
     case "${http_code}" in
-        429) echo "{\"status\":\"error\",\"message\":\"请求过于频繁 (HTTP 429)，请稍后再试\"}" ;;
-        401|403) echo "{\"status\":\"error\",\"message\":\"认证失败: API Key 无效或已过期 (HTTP ${http_code})\"}" ;;
-        000|"") echo "{\"status\":\"error\",\"message\":\"无法连接服务器，请检查网络\"}" ;;
+        429) echo "{\"result\":null,\"error\":\"请求过于频繁 (HTTP 429)，请稍后再试\"}" ;;
+        401|403) echo "{\"result\":null,\"error\":\"认证失败: API Key 无效或已过期 (HTTP ${http_code})\"}" ;;
+        000|"") echo "{\"result\":null,\"error\":\"无法连接服务器，请检查网络\"}" ;;
         *) echo "$resp" ;;
     esac
 }
@@ -512,7 +539,7 @@ api_post() {
 api_post_retry() {
     local url="$1"; shift
     local -a args=("$@")
-    local max_retries=3 resp
+    local max_retries=${API_MAX_RETRIES} resp
     for ((i=1; i<=max_retries; i++)); do
         resp=$(api_post "$url" "${args[@]}")
         local st
