@@ -10,6 +10,9 @@ readonly CERT_API="${API_BASE}/api/client/certcenter"
 readonly DDNS_API="${API_BASE}/api/client/servicedns"
 readonly STATUS_URL="https://status.i8.al/status/vps8"
 readonly GITHUB_REPO="UIMAK/vps8_dns_manager"
+readonly RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/vps8-dns-manager.sh"
+readonly INSTALL_DIR="${HOME}/.vps8-dns-manager"
+readonly INSTALL_PATH="${INSTALL_DIR}/vps8-dns-manager.sh"
 
 # Config
 CONFIG_DIR="${HOME}/.vps8-dns-manager"
@@ -331,6 +334,41 @@ config_save_key() {
     chmod 600 "$CONFIG_FILE"
     API_KEY="$key"
     export API_KEY
+}
+
+_self_install() {
+    local target_dir="$INSTALL_DIR"
+    local target="$INSTALL_PATH"
+    local source
+    source="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+    # Already installed at the target location
+    if [[ "$source" == "$target" ]]; then
+        return 0
+    fi
+
+    echo ""
+    _print_logo
+    echo ""
+    info "首次运行，正在安装 vps8 DNS Manager..."
+    mkdir -p "$target_dir"
+
+    if cp "$source" "$target" 2>/dev/null; then
+        chmod +x "$target"
+        ok "已安装到: $target"
+        info "以后可直接运行: bash $target"
+    else
+        err "安装失败，继续使用当前副本"
+        return 0
+    fi
+
+    # Create symlink in /usr/local/bin if writable
+    if [[ -w /usr/local/bin ]] || [[ -w /usr/bin ]]; then
+        local link_dir="/usr/local/bin"
+        [[ ! -w "$link_dir" ]] && link_dir="/usr/bin"
+        ln -sf "$target" "${link_dir}/vps8-dns" 2>/dev/null && \
+            info "已创建快捷命令: vps8-dns"
+    fi
 }
 
 ###############################################################################
@@ -816,24 +854,7 @@ cert_download() {
     [[ -z "$domain" ]] && { warn "未输入域名"; return 1; }
     is_domain "$domain" || { err "无效域名"; return 1; }
 
-    echo ""
-    info "下载类型:"
-    echo -e "    ${GREEN}[1]${NC} fullchain  — 完整证书链"
-    echo -e "    ${GREEN}[2]${NC} cert       — 仅证书"
-    echo -e "    ${GREEN}[3]${NC} privkey    — 私钥"
-    echo -e "    ${GREEN}[4]${NC} 全部下载"
-    echo ""
-    local choice
-    choice=$(ask "选择下载类型 (1-4)" "4")
-
-    local -a dl_types=()
-    case "$choice" in
-        1|fullchain) dl_types=(fullchain) ;;
-        2|cert)      dl_types=(cert) ;;
-        3|privkey)   dl_types=(privkey) ;;
-        4|""|*)      dl_types=(fullchain cert privkey) ;;
-    esac
-
+    local -a dl_types=(fullchain cert privkey)
     local save_dir="/cert/${domain}"
     mkdir -p "$save_dir" 2>/dev/null
 
@@ -910,6 +931,74 @@ _cert_cron_add() {
     ok "已设置每日 03:00 自动更新 ${domain} 的证书"
     info "查看: crontab -l"
     info "删除: crontab -l | grep -v '${cron_tag}' | crontab -"
+}
+
+cert_cron_manage() {
+    echo ""; _section "管理证书自动更新"; echo ""
+
+    local cert_base="/cert"
+    if [[ ! -d "$cert_base" ]]; then
+        info "目录 ${cert_base} 不存在，请先下载证书"
+        return 0
+    fi
+
+    # Find all domain directories
+    local -a domains=()
+    local d
+    for d in "$cert_base"/*/; do
+        [[ -d "$d" ]] || continue
+        d=$(basename "$d")
+        domains+=("$d")
+    done
+
+    if [[ ${#domains[@]} -eq 0 ]]; then
+        info "暂无已下载的证书，请先下载证书"
+        return 0
+    fi
+
+    # Get current crontab
+    local existing_cron
+    existing_cron=$(crontab -l 2>/dev/null || true)
+
+    # Show status table
+    echo -e "  ${DIM}$(printf '%.0s─' $(seq 1 55))${NC}"
+    printf "  ${BOLD}%-5s %-30s %-12s${NC}\n" "#" "DOMAIN" "AUTO-UPDATE"
+    echo -e "  ${DIM}$(printf '%.0s─' $(seq 1 55))${NC}"
+
+    local -a cron_status=()
+    for ((i=0; i<${#domains[@]}; i++)); do
+        local tag="vps8-cert-sync:${domains[$i]}"
+        if echo "$existing_cron" | grep -q "$tag"; then
+            cron_status+=("on")
+            printf "  ${CYAN}%-5s${NC} %-30s ${GREEN}● 已开启${NC}\n" "$((i+1))" "${domains[$i]}"
+        else
+            cron_status+=("off")
+            printf "  ${CYAN}%-5s${NC} %-30s ${RED}○ 未开启${NC}\n" "$((i+1))" "${domains[$i]}"
+        fi
+    done
+    echo -e "  ${DIM}$(printf '%.0s─' $(seq 1 55))${NC}"
+    echo ""
+
+    local choice
+    choice=$(ask "输入序号切换自动更新开关 (回车返回)")
+    [[ -z "$choice" ]] && return 0
+    is_number "$choice" || { warn "无效输入"; return 0; }
+    (( choice < 1 || choice > ${#domains[@]} )) && { warn "序号超出范围"; return 0; }
+
+    local idx=$((choice - 1))
+    local domain="${domains[$idx]}"
+    local tag="# vps8-cert-sync:${domain}"
+
+    if [[ "${cron_status[$idx]}" == "on" ]]; then
+        # Disable: remove cron entry
+        local updated
+        updated=$(echo "$existing_cron" | grep -v "$tag")
+        echo "$updated" | crontab -
+        ok "${domain} 自动更新已关闭"
+    else
+        # Enable: add cron entry
+        _cert_cron_add "$domain"
+    fi
 }
 
 cert_sync() {
@@ -1130,9 +1219,16 @@ cli_usage() {
 
   设置:
     set-key <api_key>           配置 API Key
+    install                     安装脚本到 ~/.vps8-dns-manager/
+    update                      从 GitHub 更新到最新版本
     status                      查看状态信息
     version                     显示版本
     help                        显示此帮助
+
+  一键安装:
+    curl -fsSL https://raw.githubusercontent.com/UIMAK/vps8_dns_manager/main/vps8-dns-manager.sh -o vps8-dns-manager.sh
+    chmod +x vps8-dns-manager.sh
+    bash vps8-dns-manager.sh
 
   示例:
     ./vps8-dns-manager.sh domains
@@ -1328,6 +1424,31 @@ cli_dispatch() {
             cert_sync
             ;;
 
+        # Install & Update
+        install)
+            _self_install
+            ok "安装完成"
+            ;;
+        update)
+            info "正在从 GitHub 更新..."
+            local tmp_file
+            tmp_file=$(mktemp)
+            if curl -fsSL "$RAW_URL" -o "$tmp_file" 2>/dev/null; then
+                local target="$INSTALL_PATH"
+                [[ ! -f "$target" ]] && target="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+                cp "$tmp_file" "$target"
+                chmod +x "$target"
+                rm -f "$tmp_file"
+                ok "已更新到最新版本: $target"
+                info "请重新运行: bash $target"
+                exit 0
+            else
+                rm -f "$tmp_file"
+                err "更新失败，请检查网络"
+                return 1
+            fi
+            ;;
+
         # Settings
         set-key)
             [[ $# -lt 1 ]] && { err "用法: set-key <api_key>"; return 1; }
@@ -1374,7 +1495,7 @@ menu_main() {
         echo -e "  ${GREEN}[7]${NC} 查询证书"
         echo -e "  ${GREEN}[8]${NC} 下载证书"
         echo -e "  ${GREEN}[9]${NC} 续签证书"
-        echo -e "  ${GREEN}[10]${NC} 同步已下载证书"
+        echo -e "  ${GREEN}[10]${NC} 管理证书自动更新"
         echo ""
 
         _section "系统"
@@ -1395,7 +1516,7 @@ menu_main() {
             7) cert_list; _press_any_key ;;
             8) cert_download; _press_any_key ;;
             9) cert_renew; _press_any_key ;;
-            10) cert_sync; _press_any_key ;;
+            10) cert_cron_manage; _press_any_key ;;
             11) menu_settings ;;
             0|"") echo -e "\n  ${GREEN}再见!${NC}\n"; exit 0 ;;
             *) warn "无效选项"; sleep 1 ;;
@@ -1407,6 +1528,9 @@ menu_main() {
 # Entry Point
 ###############################################################################
 main() {
+    # Self-install on first run
+    _self_install
+
     # Load config
     config_load
 
@@ -1415,7 +1539,7 @@ main() {
         # Allow help/version/set-key without API key
         if [[ $# -gt 0 ]]; then
             case "$1" in
-                help|-h|--help|version|-v|--version|set-key) ;;
+                help|-h|--help|version|-v|--version|set-key|install|update) ;;
                 *)
                     _print_logo
                     echo ""
