@@ -63,9 +63,9 @@ _print_logo() {
 # ── Status bar ──
 _print_status() {
     if [[ -n "$API_KEY" ]]; then
-        echo -e "  API: ${CYAN}$(mask_str "$API_KEY")${NC}  |  版本: ${CYAN}v${VERSION}${NC}"
+        echo -e "  API: ${CYAN}$(mask_str "$API_KEY")${NC}"
     else
-        echo -e "  API: ${RED}未配置${NC}  |  版本: ${CYAN}v${VERSION}${NC}"
+        echo -e "  API: ${RED}未配置${NC}"
     fi
     echo ""
 }
@@ -254,15 +254,15 @@ json_data_field() {
 
     # Now $after starts right after the Nth "field":
     # Trim leading whitespace
-    after="${after#"${after%%[![:space:]]*}"}"
+    after="${after#"${after%%[! ]*}"}"
 
     if [[ "${after:0:1}" == '"' ]]; then
         # String value — extract between quotes
         after="${after:1}"
         echo "${after%%\"*}"
     else
-        # Non-string value — up to , or } or whitespace
-        local val="${after%%[,}[:space:]]*}"
+        # Non-string value — up to , or }
+        local val="${after%%[,\}]*}"
         echo "$val"
     fi
 }
@@ -886,6 +886,75 @@ cert_download() {
     done
 }
 
+cert_sync() {
+    echo ""; _section "同步已下载证书"; echo ""
+
+    local cert_base="/cert"
+    if [[ ! -d "$cert_base" ]]; then
+        info "目录 ${cert_base} 不存在，暂无已下载的证书"
+        return 0
+    fi
+
+    # Find all domain directories
+    local -a domains=()
+    local d
+    for d in "$cert_base"/*/; do
+        [[ -d "$d" ]] || continue
+        d=$(basename "$d")
+        domains+=("$d")
+    done
+
+    if [[ ${#domains[@]} -eq 0 ]]; then
+        info "暂无已下载的证书"
+        return 0
+    fi
+
+    info "发现 ${#domains[@]} 个域名，开始同步..."
+    echo ""
+
+    local domain dl_type
+    for domain in "${domains[@]}"; do
+        _section "$domain"
+        for dl_type in fullchain cert privkey; do
+            local resp
+            resp=$(api_post_retry "${CERT_API}/download" domain "$domain" type "$dl_type")
+            local st
+            st=$(json_status "$resp")
+
+            if [[ "$st" != "success" ]]; then
+                warn "${dl_type}: $(json_message "$resp")"
+                continue
+            fi
+
+            local content
+            content=$(json_get "$resp" "content")
+            [[ -z "$content" ]] && content=$(json_get "$resp" "certificate")
+            [[ -z "$content" ]] && content=$(json_get "$resp" "pem")
+            [[ -z "$content" ]] && content=$(json_get "$resp" "result")
+            if echo "$resp" | grep -q "BEGIN"; then
+                content="$resp"
+            fi
+
+            if [[ -n "$content" ]]; then
+                content=$(printf '%b' "$content")
+                local fname
+                case "$dl_type" in
+                    fullchain) fname="fullchain.pem" ;;
+                    cert)      fname="cert.pem" ;;
+                    privkey)   fname="privkey.pem" ;;
+                    *)         fname="cert.pem" ;;
+                esac
+                printf '%s' "$content" > "${cert_base}/${domain}/${fname}"
+                [[ "$dl_type" == "privkey" ]] && chmod 600 "${cert_base}/${domain}/${fname}"
+                ok "${dl_type} 已更新"
+            fi
+        done
+        echo ""
+    done
+
+    info "同步完成"
+}
+
 cert_renew() {
     echo ""; _section "续签证书"; echo ""
 
@@ -1031,6 +1100,7 @@ cli_usage() {
     cert-download <domain> [type]
                                 下载证书 (fullchain/cert/privkey)
     cert-renew <domain>         续签证书
+    cert-sync                   同步所有已下载证书 (适合 cron)
 
   设置:
     set-key <api_key>           配置 API Key
@@ -1223,6 +1293,9 @@ cli_dispatch() {
                 return 1
             fi
             ;;
+        cert-sync)
+            cert_sync
+            ;;
 
         # Settings
         set-key)
@@ -1270,10 +1343,11 @@ menu_main() {
         echo -e "  ${GREEN}[7]${NC} 查询证书"
         echo -e "  ${GREEN}[8]${NC} 下载证书"
         echo -e "  ${GREEN}[9]${NC} 续签证书"
+        echo -e "  ${GREEN}[10]${NC} 同步已下载证书"
         echo ""
 
         _section "系统"
-        echo -e "  ${GREEN}[10]${NC} 设置"
+        echo -e "  ${GREEN}[11]${NC} 设置"
         echo -e "  ${GREEN}[ 0]${NC} 退出"
         echo ""
 
@@ -1290,7 +1364,8 @@ menu_main() {
             7) cert_list; _press_any_key ;;
             8) cert_download; _press_any_key ;;
             9) cert_renew; _press_any_key ;;
-            10) menu_settings ;;
+            10) cert_sync; _press_any_key ;;
+            11) menu_settings ;;
             0|"") echo -e "\n  ${GREEN}再见!${NC}\n"; exit 0 ;;
             *) warn "无效选项"; sleep 1 ;;
         esac
