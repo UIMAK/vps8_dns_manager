@@ -17,14 +17,6 @@ CONFIG_FILE="${CONFIG_DIR}/config"
 API_KEY=""
 export API_KEY
 
-# State
-declare -a NAV_STACK=()
-
-# Exit codes
-readonly EXIT_OK=0
-readonly EXIT_ERR=1
-readonly EXIT_NOKEY=2
-
 ###############################################################################
 # Terminal & Colors
 ###############################################################################
@@ -35,15 +27,6 @@ if [[ -t 1 ]]; then
 else
     RED='' GREEN='' YELLOW='' BLUE='' MAGENTA='' CYAN='' BOLD='' DIM='' NC=''
 fi
-
-# Terminal width (min 60, max 80)
-_term_width() {
-    local w
-    w=$(tput cols 2>/dev/null || echo 80)
-    (( w < 60 )) && w=60
-    (( w > 120 )) && w=120
-    echo "$w"
-}
 
 ###############################################################################
 # Signal Handling & Cleanup
@@ -69,70 +52,71 @@ _log() {
 ###############################################################################
 # Output Helpers
 ###############################################################################
-print_header() {
-    local title="$1"
-    local w=$(_term_width)
-    echo ""
-    printf "${BOLD}${CYAN}  ┌%s┐${NC}\n" "$(printf '─%.0s' $(seq 1 $((w-4))))"
-    local pad_left=$(( (w - 4 - ${#title}) / 2 ))
-    local pad_right=$(( w - 4 - ${#title} - pad_left ))
-    printf "${BOLD}${CYAN}  │%*s%s%*s│${NC}\n" "$pad_left" "" "$title" "$pad_right" ""
-    printf "${BOLD}${CYAN}  └%s┘${NC}\n" "$(printf '─%.0s' $(seq 1 $((w-4))))"
+# ── Title (centered) ──
+_print_logo() {
+    local title="vps8 DNS Manager"
+    local w=${#title}
+    local pad=$(( (40 - w) / 2 ))
+    [[ $pad -lt 0 ]] && pad=0
+    printf "  ${CYAN}${BOLD}%*s%s${NC}\n" "$pad" "" "$title"
+}
+
+# ── Status bar ──
+_print_status() {
+    if [[ -n "$API_KEY" ]]; then
+        echo -e "  API: ${CYAN}$(mask_str "$API_KEY")${NC}  |  版本: ${CYAN}v${VERSION}${NC}"
+    else
+        echo -e "  API: ${RED}未配置${NC}  |  版本: ${CYAN}v${VERSION}${NC}"
+    fi
     echo ""
 }
 
-print_banner() {
-    echo ""
-    printf "${CYAN}${BOLD}"
-    cat << 'ART'
-   ██╗   ██╗██████╗ ███████╗ ██████╗
-   ██║   ██║██╔══██╗██╔════╝██╔════╝
-   ██║   ██║██████╔╝███████╗╚█████╗
-   ╚██╗ ██╔╝██╔═══╝ ╚════██║ ╚═══██╗
-    ╚████╔╝ ██║     ███████║██████╔╝
-     ╚═══╝  ╚═╝     ╚══════╝╚═════╝
-ART
-    printf "${NC}"
-    printf "  ${DIM}DNS · Certificate · DDNS Manager v${VERSION}${NC}\n"
-    printf "  ${DIM}%s${NC}\n" "${API_BASE}"
+# ── Section header ──
+_section() {
+    echo -e "  ${CYAN}【$1】${NC}"
 }
 
+# ── Table separator ──
 sep() {
-    local w=$(_term_width)
-    printf "${DIM}  %s${NC}\n" "$(printf '─%.0s' $(seq 1 $((w-2))))"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
 }
 
-ok()   { printf "  ${GREEN}✔${NC} %s\n" "$*"; }
-info() { printf "  ${CYAN}ℹ${NC} %s\n" "$*"; }
-warn() { printf "  ${YELLOW}⚠${NC} %s\n" "$*"; }
-err()  { printf "  ${RED}✘${NC} %s\n" "$*" >&2; }
+ok()   { echo -e "  ${GREEN}[成功]${NC} $*"; }
+info() { echo -e "  ${CYAN}[信息]${NC} $*"; }
+warn() { echo -e "  ${YELLOW}[注意]${NC} $*"; }
+err()  { echo -e "  ${RED}[错误]${NC} $*" >&2; }
 
+# ── User input ──
 ask() {
     local prompt="$1" default="${2:-}" result
     if [[ -n "$default" ]]; then
-        printf "  ${CYAN}?${NC} %s ${DIM}[%s]${NC}: " "$prompt" "$default"
+        read -rp "  ${prompt} [${default}]: " result
     else
-        printf "  ${CYAN}?${NC} %s: " "$prompt"
+        read -rp "  ${prompt}: " result
     fi
-    read -r result
     echo "${result:-$default}"
 }
 
 ask_secure() {
     local prompt="$1" result
-    printf "  ${CYAN}?${NC} %s: " "$prompt"
+    printf "  %s: " "$prompt"
     read -rs result; echo ""
     echo "$result"
 }
 
 confirm() {
-    local prompt="$1" default="${2:-n}"
+    local prompt="$1" default="${2:-n}" ans
     local yn="y/N"
     [[ "$default" == "y" ]] && yn="Y/n"
-    printf "  ${CYAN}?${NC} %s ${DIM}(%s)${NC}: " "$prompt" "$yn"
-    local ans; read -r ans
+    read -rp "  ${prompt} (${yn}): " ans
     ans="${ans:-$default}"
     [[ "$ans" =~ ^[Yy] ]]
+}
+
+_press_any_key() {
+    echo ""
+    echo -e "  ${YELLOW}按回车键继续...${NC}"
+    read -r
 }
 
 # Spinner
@@ -158,7 +142,7 @@ spinner_stop() {
     printf "\r\033[K"
 }
 
-# Mask sensitive string: show first 3 and last 3 chars
+# Mask sensitive string
 mask_str() {
     local s="$1"
     local len=${#s}
@@ -448,7 +432,7 @@ _type_color() {
 # DNS Operations
 ###############################################################################
 dns_list_domains() {
-    print_header "DNS 域名列表"
+    echo ""; _section "DNS 域名列表"; echo ""
 
     local resp
     resp=$(api_post "${DNS_API}/domain_list" '{}')
@@ -490,7 +474,7 @@ dns_list_domains() {
 }
 
 dns_list_records() {
-    print_header "DNS 记录查询"
+    echo ""; _section "DNS 记录查询"; echo ""
 
     local domain
     domain=$(ask "请输入域名")
@@ -543,7 +527,7 @@ dns_list_records() {
 }
 
 dns_create_record() {
-    print_header "创建 DNS 记录"
+    echo ""; _section "创建 DNS 记录"; echo ""
 
     local domain host rtype value ttl
     domain=$(ask "域名 (如 example.com)")
@@ -596,7 +580,7 @@ dns_create_record() {
 }
 
 dns_update_record() {
-    print_header "更新 DNS 记录"
+    echo ""; _section "更新 DNS 记录"; echo ""
 
     local domain record_id value ttl
     domain=$(ask "域名")
@@ -630,7 +614,7 @@ dns_update_record() {
 }
 
 dns_delete_record() {
-    print_header "删除 DNS 记录"
+    echo ""; _section "删除 DNS 记录"; echo ""
 
     local domain record_id
     domain=$(ask "域名")
@@ -665,7 +649,7 @@ dns_delete_record() {
 # DDNS Operations
 ###############################################################################
 ddns_update() {
-    print_header "DDNS 动态 IP 更新"
+    echo ""; _section "DDNS 动态 IP 更新"; echo ""
 
     local domain record_name record_type record_value ttl
 
@@ -744,7 +728,7 @@ ddns_update() {
 # Certificate Operations
 ###############################################################################
 cert_list() {
-    print_header "证书列表"
+    echo ""; _section "证书列表"; echo ""
 
     local domain
     domain=$(ask "请输入域名")
@@ -826,7 +810,7 @@ cert_list() {
 }
 
 cert_download() {
-    print_header "下载证书"
+    echo ""; _section "下载证书"; echo ""
 
     local domain dl_type
     domain=$(ask "域名")
@@ -835,10 +819,10 @@ cert_download() {
 
     echo ""
     info "下载类型:"
-    printf "    ${CYAN}1${NC}) fullchain  — 完整证书链\n"
-    printf "    ${CYAN}2${NC}) cert       — 仅证书\n"
-    printf "    ${CYAN}3${NC}) privkey    — 私钥\n"
-    printf "    ${CYAN}4${NC}) bundle     — 打包下载\n"
+    echo -e "    ${GREEN}[1]${NC} fullchain  — 完整证书链"
+    echo -e "    ${GREEN}[2]${NC} cert       — 仅证书"
+    echo -e "    ${GREEN}[3]${NC} privkey    — 私钥"
+    echo -e "    ${GREEN}[4]${NC} bundle     — 打包下载"
     echo ""
     local choice
     choice=$(ask "选择下载类型 (1-4)" "1")
@@ -905,7 +889,7 @@ cert_download() {
 }
 
 cert_renew() {
-    print_header "续签证书"
+    echo ""; _section "续签证书"; echo ""
 
     local domain
     domain=$(ask "域名")
@@ -934,7 +918,7 @@ cert_renew() {
 # Settings
 ###############################################################################
 settings_api_key() {
-    print_header "API Key 设置"
+    echo ""; _section "API Key 设置"; echo ""
 
     if [[ -n "$API_KEY" ]]; then
         info "当前 API Key: $(mask_str "$API_KEY")"
@@ -960,7 +944,7 @@ settings_api_key() {
 }
 
 settings_view() {
-    print_header "设置信息"
+    echo ""; _section "设置信息"; echo ""
 
     info "配置文件: ${CONFIG_FILE}"
     info "日志文件: ${CONFIG_DIR}/app.log"
@@ -977,66 +961,26 @@ settings_view() {
 ###############################################################################
 # Submenus
 ###############################################################################
-menu_dns() {
-    while true; do
-        print_header "DNS 记录管理"
-        printf "    ${CYAN}1${NC}) 列出所有域名\n"
-        printf "    ${CYAN}2${NC}) 查询域名记录\n"
-        printf "    ${CYAN}3${NC}) 创建记录\n"
-        printf "    ${CYAN}4${NC}) 更新记录\n"
-        printf "    ${CYAN}5${NC}) 删除记录\n"
-        echo ""
-        printf "    ${CYAN}0${NC}) 返回主菜单\n"
-        echo ""
-        local choice
-        choice=$(ask "请选择" "0")
-        case "$choice" in
-            1) dns_list_domains; read -rp "  按 Enter 继续..." _ ;;
-            2) dns_list_records; read -rp "  按 Enter 继续..." _ ;;
-            3) dns_create_record; read -rp "  按 Enter 继续..." _ ;;
-            4) dns_update_record; read -rp "  按 Enter 继续..." _ ;;
-            5) dns_delete_record; read -rp "  按 Enter 继续..." _ ;;
-            0|*) return ;;
-        esac
-    done
-}
-
-menu_cert() {
-    while true; do
-        print_header "证书管理"
-        printf "    ${CYAN}1${NC}) 查询证书\n"
-        printf "    ${CYAN}2${NC}) 下载证书\n"
-        printf "    ${CYAN}3${NC}) 续签证书\n"
-        echo ""
-        printf "    ${CYAN}0${NC}) 返回主菜单\n"
-        echo ""
-        local choice
-        choice=$(ask "请选择" "0")
-        case "$choice" in
-            1) cert_list; read -rp "  按 Enter 继续..." _ ;;
-            2) cert_download; read -rp "  按 Enter 继续..." _ ;;
-            3) cert_renew; read -rp "  按 Enter 继续..." _ ;;
-            0|*) return ;;
-        esac
-    done
-}
-
 menu_settings() {
     while true; do
-        print_header "设置"
-        printf "    ${CYAN}1${NC}) 配置 API Key\n"
-        printf "    ${CYAN}2${NC}) 查看设置信息\n"
-        printf "    ${CYAN}3${NC}) 查看服务状态\n"
+        clear
+        _print_logo
         echo ""
-        printf "    ${CYAN}0${NC}) 返回主菜单\n"
+        _section "设置"
+        echo -e "  ${GREEN}[1]${NC} 配置 API Key"
+        echo -e "  ${GREEN}[2]${NC} 查看设置信息"
+        echo -e "  ${GREEN}[3]${NC} 查看服务状态"
+        echo ""
+        echo -e "  ${GREEN}[0]${NC} 返回主菜单"
         echo ""
         local choice
-        choice=$(ask "请选择" "0")
+        read -rp "  请选择: " choice
         case "$choice" in
-            1) settings_api_key; read -rp "  按 Enter 继续..." _ ;;
-            2) settings_view; read -rp "  按 Enter 继续..." _ ;;
-            3) info "正在打开状态页面..."; echo "  ${CYAN}${STATUS_URL}${NC}" ;;
-            0|*) return ;;
+            1) settings_api_key; _press_any_key ;;
+            2) settings_view; _press_any_key ;;
+            3) info "状态页面: ${STATUS_URL}" ;;
+            0|"") return ;;
+            *) warn "无效选项"; sleep 1 ;;
         esac
     done
 }
@@ -1285,57 +1229,51 @@ cli_dispatch() {
 # Interactive Main Menu
 ###############################################################################
 menu_main() {
-    NAV_STACK=("main")
-
     while true; do
-        print_banner
+        clear
+        _print_logo
         echo ""
-        printf "  ${BOLD}━━━ DNS 管理 ━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-        printf "    ${CYAN}1${NC}) 列出所有域名\n"
-        printf "    ${CYAN}2${NC}) 查询 DNS 记录\n"
-        printf "    ${CYAN}3${NC}) 创建 DNS 记录\n"
-        printf "    ${CYAN}4${NC}) 更新 DNS 记录\n"
-        printf "    ${CYAN}5${NC}) 删除 DNS 记录\n"
+        _print_status
+
+        _section "DNS 管理"
+        echo -e "  ${GREEN}[1]${NC} 列出所有域名"
+        echo -e "  ${GREEN}[2]${NC} 查询 DNS 记录"
+        echo -e "  ${GREEN}[3]${NC} 创建 DNS 记录"
+        echo -e "  ${GREEN}[4]${NC} 更新 DNS 记录"
+        echo -e "  ${GREEN}[5]${NC} 删除 DNS 记录"
         echo ""
-        printf "  ${BOLD}━━━ DDNS ━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-        printf "    ${CYAN}6${NC}) DDNS 动态 IP 更新\n"
+
+        _section "DDNS"
+        echo -e "  ${GREEN}[6]${NC} DDNS 动态 IP 更新"
         echo ""
-        printf "  ${BOLD}━━━ 证书管理 ━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-        printf "    ${CYAN}7${NC}) 查询证书\n"
-        printf "    ${CYAN}8${NC}) 下载证书\n"
-        printf "    ${CYAN}9${NC}) 续签证书\n"
+
+        _section "证书管理"
+        echo -e "  ${GREEN}[7]${NC} 查询证书"
+        echo -e "  ${GREEN}[8]${NC} 下载证书"
+        echo -e "  ${GREEN}[9]${NC} 续签证书"
         echo ""
-        printf "  ${BOLD}━━━ 系统 ━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-        printf "    ${YELLOW}s${NC}) API Key 设置"
-        if [[ -n "$API_KEY" ]]; then
-            printf "  ${DIM}[$(mask_str "$API_KEY")]${NC}"
-        else
-            printf "  ${RED}[未配置]${NC}"
-        fi
+
+        _section "系统"
+        echo -e "  ${GREEN}[10]${NC} 设置"
+        echo -e "  ${GREEN}[ 0]${NC} 退出"
         echo ""
-        printf "    ${YELLOW}i${NC}) 查看信息\n"
-        printf "    ${YELLOW}q${NC}) 退出\n"
-        echo ""
-        sep
 
         local choice
-        choice=$(ask "请选择操作" "")
-        echo ""
+        read -rp "  请选择: " choice
 
         case "$choice" in
-            1) dns_list_domains; read -rp "  按 Enter 继续..." _ ;;
-            2) dns_list_records; read -rp "  按 Enter 继续..." _ ;;
-            3) dns_create_record; read -rp "  按 Enter 继续..." _ ;;
-            4) dns_update_record; read -rp "  按 Enter 继续..." _ ;;
-            5) dns_delete_record; read -rp "  按 Enter 继续..." _ ;;
-            6) ddns_update; read -rp "  按 Enter 继续..." _ ;;
-            7) cert_list; read -rp "  按 Enter 继续..." _ ;;
-            8) cert_download; read -rp "  按 Enter 继续..." _ ;;
-            9) cert_renew; read -rp "  按 Enter 继续..." _ ;;
-            s|S) settings_api_key; read -rp "  按 Enter 继续..." _ ;;
-            i|I) settings_view; read -rp "  按 Enter 继续..." _ ;;
-            q|Q|0) echo -e "  ${GREEN}再见!${NC}\n"; exit 0 ;;
-            *) warn "无效选项: $choice"; sleep 1 ;;
+            1) dns_list_domains; _press_any_key ;;
+            2) dns_list_records; _press_any_key ;;
+            3) dns_create_record; _press_any_key ;;
+            4) dns_update_record; _press_any_key ;;
+            5) dns_delete_record; _press_any_key ;;
+            6) ddns_update; _press_any_key ;;
+            7) cert_list; _press_any_key ;;
+            8) cert_download; _press_any_key ;;
+            9) cert_renew; _press_any_key ;;
+            10) menu_settings ;;
+            0|"") echo -e "\n  ${GREEN}再见!${NC}\n"; exit 0 ;;
+            *) warn "无效选项"; sleep 1 ;;
         esac
     done
 }
@@ -1354,12 +1292,11 @@ main() {
             case "$1" in
                 help|-h|--help|version|-v|--version|set-key) ;;
                 *)
-                    print_banner
+                    _print_logo
                     echo ""
                     warn "尚未配置 API Key"
-                    info "请先运行以下命令配置:"
-                    printf "    ${CYAN}./%s set-key YOUR_API_KEY${NC}\n" "$SCRIPT_NAME"
-                    info "或在交互模式中选择 's' 进行配置"
+                    info "请先运行: ./${SCRIPT_NAME} set-key YOUR_API_KEY"
+                    info "或在交互菜单中选择「设置」进行配置"
                     echo ""
                     ;;
             esac
