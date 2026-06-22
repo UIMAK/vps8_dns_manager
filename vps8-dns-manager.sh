@@ -162,7 +162,8 @@ json_get() {
     local json="$1" key="$2"
     # Try string value first
     local val
-    val=$(printf '%s' "$json" | awk -v k="\"$key\"" '{
+    val=$(printf '%s
+' "$json" | awk -v k="\"$key\"" '{
         idx = index($0, k)
         if (idx > 0) {
             rest = substr($0, idx + length(k))
@@ -188,7 +189,8 @@ json_data_raw() {
     local json="$1"
     # Try array first
     local arr
-    arr=$(printf '%s' "$json" | awk '{
+    arr=$(printf '%s
+' "$json" | awk '{
         idx = index($0, "\"result\"")
         if (idx > 0) {
             rest = substr($0, idx + 8)
@@ -220,7 +222,8 @@ json_data_count() {
     local raw
     raw=$(json_data_raw "$json")
     if [[ -z "$raw" ]]; then echo "0"; return; fi
-    printf '%s' "$raw" | awk '{
+    printf '%s
+' "$raw" | awk '{
         depth=0; count=0; instr=0
         for(i=1;i<=length($0);i++){
             c=substr($0,i,1)
@@ -242,7 +245,7 @@ json_data_field() {
     raw=$(json_data_raw "$json")
     if [[ -z "$raw" ]]; then echo ""; return; fi
 
-    printf '%s' "$raw" | awk -v idx="$idx" -v field="$field" '
+    printf '%s\n' "$raw" | awk -v idx="$idx" -v field="$field" '
     BEGIN { n=0; inobj=0; depth=0; instr=0 }
     {
         for(i=1; i<=length($0); i++) {
@@ -282,7 +285,8 @@ json_data_field() {
 # Check if result is an array or object
 json_data_type() {
     local json="$1"
-    printf '%s' "$json" | awk '{
+    printf '%s
+' "$json" | awk '{
         idx = index($0, "\"result\"")
         if (idx > 0) {
             rest = substr($0, idx + 8)
