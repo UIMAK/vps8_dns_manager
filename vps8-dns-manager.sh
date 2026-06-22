@@ -40,9 +40,25 @@ fi
 ###############################################################################
 # Signal Handling & Cleanup
 ###############################################################################
+# Track temp files for cleanup on signal
+declare -a _TEMP_FILES=()
+
+_register_temp() { _TEMP_FILES+=("$1"); }
+
+_cleanup_temps() {
+    local f
+    for f in "${_TEMP_FILES[@]}"; do
+        rm -f "$f" 2>/dev/null
+    done
+    _TEMP_FILES=()
+}
+
 _cleanup() {
     local ec=$?
+    # Kill spinner if running
+    [[ -n "$_spinner_pid" ]] && kill "$_spinner_pid" 2>/dev/null
     printf "\r\033[K" 2>/dev/null  # clear spinner line
+    _cleanup_temps
     exit "$ec"
 }
 trap _cleanup EXIT INT TERM
@@ -52,9 +68,18 @@ trap _cleanup EXIT INT TERM
 ###############################################################################
 _log() {
     local level="$1"; shift
+    local log_file="${CONFIG_DIR}/app.log"
+    # Rotate if > 1MB
+    if [[ -f "$log_file" ]]; then
+        local sz
+        sz=$(stat -c%s "$log_file" 2>/dev/null || stat -f%z "$log_file" 2>/dev/null || echo 0)
+        if [[ "$sz" -gt 1048576 ]]; then
+            mv "$log_file" "${log_file}.1" 2>/dev/null
+        fi
+    fi
     local ts
     ts=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$ts] [$level] $*" >> "${CONFIG_DIR}/app.log" 2>/dev/null
+    echo "[$ts] [$level] $*" >> "$log_file" 2>/dev/null
 }
 
 ###############################################################################
