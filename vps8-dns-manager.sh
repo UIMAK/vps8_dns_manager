@@ -1165,20 +1165,25 @@ cert_download() {
 _cert_cron_add() {
     local domain="$1"
     local script_path
-    script_path=$(readlink -f "$0" 2>/dev/null || echo "$0")
-    local cron_cmd="0 3 * * * /bin/bash ${script_path} cert-download ${domain} fullchain >/dev/null 2>&1 && /bin/bash ${script_path} cert-download ${domain} cert >/dev/null 2>&1 && /bin/bash ${script_path} cert-download ${domain} privkey >/dev/null 2>&1"
+    # Portable path resolution (readlink -f is GNU-only; macOS/BSD fallback)
+    script_path=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")")
+    # Single cert-sync call per domain — replaces 3 separate cert-download invocations
+    # Randomize minute/hour per domain to spread load across the day
+    local cron_min=$((RANDOM % 60))
+    local cron_hour=$((RANDOM % 24))
+    local cron_cmd="${cron_min} ${cron_hour} * * * /bin/bash ${script_path} cert-sync ${domain} >/dev/null 2>&1"
     local cron_tag="# vps8-cert-sync:${domain}"
 
-    # Remove existing entry for this domain
+    # Remove existing entry for this domain (fixed-string match to avoid regex issues)
     local existing
     existing=$(crontab -l 2>/dev/null || true)
-    existing=$(echo "$existing" | grep -v "$cron_tag")
+    existing=$(echo "$existing" | grep -vF "$cron_tag")
 
     # Add new entry
     printf '%s\n%s %s\n' "$existing" "$cron_cmd" "$cron_tag" | crontab -
-    ok "已设置每日 03:00 自动更新 ${domain} 的证书"
+    ok "已设置每日 $(printf '%02d:%02d' "$cron_hour" "$cron_min") 自动更新 ${domain} 的证书"
     info "查看: crontab -l"
-    info "删除: crontab -l | grep -v '${cron_tag}' | crontab -"
+    info "删除: crontab -l | grep -vF '${cron_tag}' | crontab -"
 }
 
 cert_cron_manage() {
@@ -1216,7 +1221,7 @@ cert_cron_manage() {
     local -a cron_status=()
     for ((i=0; i<${#domains[@]}; i++)); do
         local tag="vps8-cert-sync:${domains[$i]}"
-        if echo "$existing_cron" | grep -q "$tag"; then
+        if echo "$existing_cron" | grep -qF "$tag"; then
             cron_status+=("on")
             printf "  ${CYAN}%-5s${NC} %-30s ${GREEN}● 已开启${NC}\n" "$((i+1))" "${domains[$i]}"
         else
@@ -1240,7 +1245,7 @@ cert_cron_manage() {
     if [[ "${cron_status[$idx]}" == "on" ]]; then
         # Disable: remove cron entry
         local updated
-        updated=$(echo "$existing_cron" | grep -v "$tag")
+        updated=$(echo "$existing_cron" | grep -vF "$tag")
         echo "$updated" | crontab -
         ok "${domain} 自动更新已关闭"
     else
@@ -1250,6 +1255,8 @@ cert_cron_manage() {
 }
 
 cert_sync() {
+    local target_domain="${1:-}"
+
     echo ""; _section "同步已下载证书"; echo ""
 
     local cert_base="/cert"
@@ -1258,14 +1265,23 @@ cert_sync() {
         return 0
     fi
 
-    # Find all domain directories
+    # Find domain directories (or use specified domain)
     local -a domains=()
-    local d
-    for d in "$cert_base"/*/; do
-        [[ -d "$d" ]] || continue
-        d=$(basename "$d")
-        domains+=("$d")
-    done
+    if [[ -n "$target_domain" ]]; then
+        if [[ -d "${cert_base}/${target_domain}" ]]; then
+            domains+=("$target_domain")
+        else
+            warn "目录 ${cert_base}/${target_domain} 不存在，请先下载证书"
+            return 1
+        fi
+    else
+        local d
+        for d in "$cert_base"/*/; do
+            [[ -d "$d" ]] || continue
+            d=$(basename "$d")
+            domains+=("$d")
+        done
+    fi
 
     if [[ ${#domains[@]} -eq 0 ]]; then
         info "暂无已下载的证书"
@@ -1658,7 +1674,7 @@ cli_dispatch() {
             fi
             ;;
         cert-sync)
-            cert_sync
+            cert_sync "$@"
             ;;
 
         # Install & Update
