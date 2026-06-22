@@ -20,6 +20,12 @@ CONFIG_FILE="${CONFIG_DIR}/config"
 API_KEY=""
 export API_KEY
 
+# Defaults
+readonly DEFAULT_DNS_TTL=600
+readonly DEFAULT_DDNS_TTL=300
+readonly API_MAX_RETRIES=3
+readonly API_RETRY_BACKOFF=2
+
 ###############################################################################
 # Terminal & Colors
 ###############################################################################
