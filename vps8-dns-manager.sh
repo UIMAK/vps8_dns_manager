@@ -215,43 +215,45 @@ json_data_raw() {
     echo "$arr"
 }
 
-# Count objects in a JSON array (by counting occurrences of { at top level)
+# Count objects in a JSON result array
 # Usage: json_data_count "$json"
 json_data_count() {
     local json="$1"
-    local raw
-    raw=$(json_data_raw "$json")
-    if [[ -z "$raw" ]]; then echo "0"; return; fi
-    # Count top-level { by splitting on } and counting
-    local count=0
-    local tmp="$raw"
-    while [[ "$tmp" == *"{"* ]]; do
-        count=$((count + 1))
-        tmp="${tmp#*\}}"
-    done
-    echo "$count"
+    # Count occurrences of "id": as a proxy for object count
+    # Works for DNS records and cert arrays
+    local c
+    c=$(printf '%s' "$json" | grep -o '"id":' | wc -l)
+    c=$(echo "$c" | tr -d '[:space:]')
+    # Fallback: count { if no "id" fields
+    if [[ "$c" -eq 0 ]]; then
+        c=$(printf '%s' "$json" | grep -o '"domain":' | wc -l)
+        c=$(echo "$c" | tr -d '[:space:]')
+    fi
+    echo "${c:-0}"
 }
 
-# Extract a field value from the Nth object (0-indexed) in the data array
-# Uses grep -o for reliable extraction on all platforms
+# Extract a field value from the Nth object (0-indexed) in the result array
+# Searches directly in the full JSON — does NOT depend on json_data_raw
 # Usage: json_data_field "$json" 0 "domain"
 json_data_field() {
     local json="$1" idx="$2" field="$3"
-    local raw
-    raw=$(json_data_raw "$json")
-    if [[ -z "$raw" ]]; then echo ""; return; fi
 
-    # Extract the Nth object using grep -o '{[^}]*}'
-    # This works for flat objects (no nested {})
-    local obj
-    obj=$(printf '%s' "$raw" | grep -o '{[^}]*}' | sed -n "$((idx+1))p")
-    if [[ -z "$obj" ]]; then echo ""; return; fi
+    # Find all occurrences of "field": in the JSON
+    local search_key="\"${field}\":"
+    local after="${json#*${search_key}}"
 
-    # Extract field value from this object using bash string ops
-    local pattern="\"${field}\""
-    local after="${obj#*${pattern}}"
-    # Remove leading : and whitespace
-    after="${after#*:}"
+    # Skip to the Nth occurrence
+    local i
+    for ((i=0; i<idx; i++)); do
+        local next="${after#*${search_key}}"
+        if [[ "$next" == "$after" ]]; then
+            echo ""; return  # No more occurrences
+        fi
+        after="$next"
+    done
+
+    # Now $after starts right after the Nth "field":
+    # Trim leading whitespace
     after="${after#"${after%%[![:space:]]*}"}"
 
     if [[ "${after:0:1}" == '"' ]]; then
@@ -259,8 +261,8 @@ json_data_field() {
         after="${after:1}"
         echo "${after%%\"*}"
     else
-        # Non-string value (number, bool, null) — up to , or }
-        local val="${after%%[,}]*}"
+        # Non-string value — up to , or } or whitespace
+        local val="${after%%[,}[:space:]]*}"
         echo "$val"
     fi
 }
@@ -809,7 +811,7 @@ cert_list() {
 cert_download() {
     echo ""; _section "下载证书"; echo ""
 
-    local domain dl_type
+    local domain
     domain=$(ask "域名")
     [[ -z "$domain" ]] && { warn "未输入域名"; return 1; }
     is_domain "$domain" || { err "无效域名"; return 1; }
@@ -819,65 +821,69 @@ cert_download() {
     echo -e "    ${GREEN}[1]${NC} fullchain  — 完整证书链"
     echo -e "    ${GREEN}[2]${NC} cert       — 仅证书"
     echo -e "    ${GREEN}[3]${NC} privkey    — 私钥"
+    echo -e "    ${GREEN}[4]${NC} 全部下载"
     echo ""
     local choice
-    choice=$(ask "选择下载类型 (1-3)" "1")
+    choice=$(ask "选择下载类型 (1-4)" "4")
+
+    local -a dl_types=()
     case "$choice" in
-        1|fullchain) dl_type="fullchain" ;;
-        2|cert)      dl_type="cert" ;;
-        3|privkey)   dl_type="privkey" ;;
-        *)           dl_type="fullchain" ;;
+        1|fullchain) dl_types=(fullchain) ;;
+        2|cert)      dl_types=(cert) ;;
+        3|privkey)   dl_types=(privkey) ;;
+        4|""|*)      dl_types=(fullchain cert privkey) ;;
     esac
 
-    local save_dir="/certs/${domain}"
+    local save_dir="/cert/${domain}"
     mkdir -p "$save_dir" 2>/dev/null
 
-    info "正在下载 ${dl_type}..."
-    local resp
-    resp=$(api_post_retry "${CERT_API}/download" domain "$domain" type "$dl_type")
-    local st msg
-    st=$(json_status "$resp")
+    local dl_type
+    for dl_type in "${dl_types[@]}"; do
+        info "正在下载 ${dl_type}..."
+        local resp
+        resp=$(api_post_retry "${CERT_API}/download" domain "$domain" type "$dl_type")
+        local st
+        st=$(json_status "$resp")
 
-    if [[ "$st" != "success" ]]; then
-        _api_error "下载失败" "$resp"
-        return 1
-    fi
-
-    # Extract PEM content
-    local content
-    content=$(json_get "$resp" "content")
-    [[ -z "$content" ]] && content=$(json_get "$resp" "certificate")
-    [[ -z "$content" ]] && content=$(json_get "$resp" "pem")
-    [[ -z "$content" ]] && content=$(json_get "$resp" "data")
-
-    if [[ -z "$content" ]]; then
-        # Maybe raw PEM in response
-        if echo "$resp" | grep -q "BEGIN"; then
-            content="$resp"
+        if [[ "$st" != "success" ]]; then
+            _api_error "下载 ${dl_type} 失败" "$resp"
+            continue
         fi
-    fi
 
-    if [[ -n "$content" ]]; then
-        # Unescape \n
-        content=$(printf '%b' "$content")
-        local fname
-        case "$dl_type" in
-            fullchain) fname="fullchain.pem" ;;
-            cert)      fname="cert.pem" ;;
-            privkey)   fname="privkey.pem" ;;
-            *)         fname="cert.pem" ;;
-        esac
-        printf '%s' "$content" > "${save_dir}/${fname}"
-        # Set permissions
-        if [[ "$dl_type" == "privkey" ]]; then
-            chmod 600 "${save_dir}/${fname}"
+        # Extract PEM content
+        local content
+        content=$(json_get "$resp" "content")
+        [[ -z "$content" ]] && content=$(json_get "$resp" "certificate")
+        [[ -z "$content" ]] && content=$(json_get "$resp" "pem")
+        [[ -z "$content" ]] && content=$(json_get "$resp" "result")
+
+        if [[ -z "$content" ]]; then
+            # Maybe raw PEM in response
+            if echo "$resp" | grep -q "BEGIN"; then
+                content="$resp"
+            fi
+        fi
+
+        if [[ -n "$content" ]]; then
+            content=$(printf '%b' "$content")
+            local fname
+            case "$dl_type" in
+                fullchain) fname="fullchain.pem" ;;
+                cert)      fname="cert.pem" ;;
+                privkey)   fname="privkey.pem" ;;
+                *)         fname="cert.pem" ;;
+            esac
+            printf '%s' "$content" > "${save_dir}/${fname}"
+            if [[ "$dl_type" == "privkey" ]]; then
+                chmod 600 "${save_dir}/${fname}"
+            else
+                chmod 644 "${save_dir}/${fname}"
+            fi
+            ok "已保存: ${save_dir}/${fname}"
         else
-            chmod 644 "${save_dir}/${fname}"
+            err "未获取到 ${dl_type} 内容"
         fi
-        ok "已保存: ${save_dir}/${fname}"
-    else
-        err "未获取到证书内容"
-    fi
+    done
 }
 
 cert_renew() {
@@ -1181,7 +1187,7 @@ cli_dispatch() {
             [[ $# -lt 1 ]] && { err "用法: cert-download <domain> [type]"; return 1; }
             local domain="$1" dl_type="${2:-fullchain}"
             is_domain "$domain" || { err "无效域名"; return 1; }
-            local save_dir="/certs/${domain}"
+            local save_dir="/cert/${domain}"
             mkdir -p "$save_dir" 2>/dev/null
             local resp
             resp=$(api_post_retry "${CERT_API}/download" "domain=${domain}&type=${dl_type}" \
