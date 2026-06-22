@@ -215,29 +215,25 @@ json_data_raw() {
     echo "$arr"
 }
 
-# Count objects in a JSON array (by counting top-level { } pairs)
+# Count objects in a JSON array (by counting occurrences of { at top level)
 # Usage: json_data_count "$json"
 json_data_count() {
     local json="$1"
     local raw
     raw=$(json_data_raw "$json")
     if [[ -z "$raw" ]]; then echo "0"; return; fi
-    printf '%s
-' "$raw" | awk '{
-        depth=0; count=0; instr=0
-        for(i=1;i<=length($0);i++){
-            c=substr($0,i,1)
-            if(c=="\"" && (i==1 || substr($0,i-1,1)!="\\")){instr=!instr;continue}
-            if(instr) continue
-            if(c=="{"){depth++;if(depth==1)count++}
-            else if(c=="}"){depth--}
-        }
-        print count
-    }'
+    # Count top-level { by splitting on } and counting
+    local count=0
+    local tmp="$raw"
+    while [[ "$tmp" == *"{"* ]]; do
+        count=$((count + 1))
+        tmp="${tmp#*\}}"
+    done
+    echo "$count"
 }
 
 # Extract a field value from the Nth object (0-indexed) in the data array
-# Handles nested objects correctly by tracking brace depth
+# Uses grep -o for reliable extraction on all platforms
 # Usage: json_data_field "$json" 0 "domain"
 json_data_field() {
     local json="$1" idx="$2" field="$3"
@@ -245,41 +241,28 @@ json_data_field() {
     raw=$(json_data_raw "$json")
     if [[ -z "$raw" ]]; then echo ""; return; fi
 
-    printf '%s\n' "$raw" | awk -v idx="$idx" -v field="$field" '
-    BEGIN { n=0; inobj=0; depth=0; instr=0 }
-    {
-        for(i=1; i<=length($0); i++) {
-            c = substr($0,i,1)
-            if (c == "\"" && (i==1 || substr($0,i-1,1) != "\\")) { instr=!instr; continue }
-            if (instr) continue
-            if (c == "{") { depth++; if(depth==1) { n++; inobj=1; buf="" } }
-            else if (c == "}") {
-                depth--
-                if (depth==0 && inobj && (n-1)==idx) {
-                    # Extract field from buf (this is a flat object string)
-                    pat = "\"" field "\""
-                    pos = index(buf, pat)
-                    if (pos > 0) {
-                        rest = substr(buf, pos + length(pat))
-                        sub(/^[[:space:]]*:[[:space:]]*/, "", rest)
-                        if (substr(rest,1,1) == "\"") {
-                            sub(/^"/, "", rest)
-                            sub(/".*/, "", rest)
-                        } else {
-                            sub(/[,}\r\n ].*/, "", rest)
-                        }
-                        print rest
-                    }
-                    exit
-                }
-                inobj=0
-            }
-            else if (inobj && depth >= 1) {
-                # Only capture at depth 1 (top-level fields of the object)
-                if (depth == 1) buf = buf c
-            }
-        }
-    }'
+    # Extract the Nth object using grep -o '{[^}]*}'
+    # This works for flat objects (no nested {})
+    local obj
+    obj=$(printf '%s' "$raw" | grep -o '{[^}]*}' | sed -n "$((idx+1))p")
+    if [[ -z "$obj" ]]; then echo ""; return; fi
+
+    # Extract field value from this object using bash string ops
+    local pattern="\"${field}\""
+    local after="${obj#*${pattern}}"
+    # Remove leading : and whitespace
+    after="${after#*:}"
+    after="${after#"${after%%[![:space:]]*}"}"
+
+    if [[ "${after:0:1}" == '"' ]]; then
+        # String value — extract between quotes
+        after="${after:1}"
+        echo "${after%%\"*}"
+    else
+        # Non-string value (number, bool, null) — up to , or }
+        local val="${after%%[,}]*}"
+        echo "$val"
+    fi
 }
 
 # Check if result is an array or object
@@ -836,19 +819,17 @@ cert_download() {
     echo -e "    ${GREEN}[1]${NC} fullchain  — 完整证书链"
     echo -e "    ${GREEN}[2]${NC} cert       — 仅证书"
     echo -e "    ${GREEN}[3]${NC} privkey    — 私钥"
-    echo -e "    ${GREEN}[4]${NC} bundle     — 打包下载"
     echo ""
     local choice
-    choice=$(ask "选择下载类型 (1-4)" "1")
+    choice=$(ask "选择下载类型 (1-3)" "1")
     case "$choice" in
         1|fullchain) dl_type="fullchain" ;;
         2|cert)      dl_type="cert" ;;
         3|privkey)   dl_type="privkey" ;;
-        4|bundle)    dl_type="bundle" ;;
         *)           dl_type="fullchain" ;;
     esac
 
-    local save_dir="${SCRIPT_DIR}/certs/${domain}"
+    local save_dir="/certs/${domain}"
     mkdir -p "$save_dir" 2>/dev/null
 
     info "正在下载 ${dl_type}..."
@@ -884,7 +865,6 @@ cert_download() {
             fullchain) fname="fullchain.pem" ;;
             cert)      fname="cert.pem" ;;
             privkey)   fname="privkey.pem" ;;
-            bundle)    fname="bundle.tar.gz" ;;
             *)         fname="cert.pem" ;;
         esac
         printf '%s' "$content" > "${save_dir}/${fname}"
@@ -1043,7 +1023,7 @@ cli_usage() {
   证书管理:
     cert-list <domain>          查询证书
     cert-download <domain> [type]
-                                下载证书 (fullchain/cert/privkey/bundle)
+                                下载证书 (fullchain/cert/privkey)
     cert-renew <domain>         续签证书
 
   设置:
@@ -1201,7 +1181,7 @@ cli_dispatch() {
             [[ $# -lt 1 ]] && { err "用法: cert-download <domain> [type]"; return 1; }
             local domain="$1" dl_type="${2:-fullchain}"
             is_domain "$domain" || { err "无效域名"; return 1; }
-            local save_dir="${SCRIPT_DIR}/certs/${domain}"
+            local save_dir="/certs/${domain}"
             mkdir -p "$save_dir" 2>/dev/null
             local resp
             resp=$(api_post_retry "${CERT_API}/download" "domain=${domain}&type=${dl_type}" \
@@ -1212,7 +1192,6 @@ cli_dispatch() {
                 [[ -z "$content" ]] && content=$(json_get "$resp" "certificate")
                 if [[ -n "$content" ]]; then
                     local fname="${dl_type}.pem"
-                    [[ "$dl_type" == "bundle" ]] && fname="bundle.tar.gz"
                     printf '%b' "$content" > "${save_dir}/${fname}"
                     ok "Saved: ${save_dir}/${fname}"
                 else
