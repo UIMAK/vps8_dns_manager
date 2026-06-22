@@ -338,6 +338,23 @@ config_save_key() {
 # API Layer
 ###############################################################################
 
+# Show API error with raw response context
+_api_error() {
+    local default_msg="$1" resp="$2"
+    local msg
+    msg=$(json_message "$resp")
+    if [[ -n "$msg" ]]; then
+        err "$msg"
+    else
+        err "$default_msg"
+        # Show truncated raw response for debugging
+        local raw="${resp:0:300}"
+        if [[ -n "$raw" ]]; then
+            info "原始响应: $raw"
+        fi
+    fi
+}
+
 # Generic POST with Basic Auth + form-encoded data
 # Usage: api_post <url> [key value] [key value] ...
 api_post() {
@@ -438,8 +455,7 @@ dns_list_domains() {
     st=$(json_status "$resp")
 
     if [[ "$st" != "success" ]]; then
-        msg=$(json_message "$resp")
-        err "${msg:-获取域名列表失败}"
+        _api_error "获取域名列表失败" "$resp"
         return 1
     fi
 
@@ -485,8 +501,7 @@ dns_list_records() {
     st=$(json_status "$resp")
 
     if [[ "$st" != "success" ]]; then
-        msg=$(json_message "$resp")
-        err "${msg:-获取记录失败}"
+        _api_error "获取记录失败" "$resp"
         return 1
     fi
 
@@ -569,8 +584,7 @@ dns_create_record() {
     if [[ "$st" == "success" ]]; then
         ok "记录创建成功: ${host}.${domain} → ${value} (${rtype})"
     else
-        msg=$(json_message "$resp")
-        err "${msg:-创建记录失败}"
+        _api_error "创建记录失败" "$resp"
     fi
 }
 
@@ -600,8 +614,7 @@ dns_update_record() {
     if [[ "$st" == "success" ]]; then
         ok "记录更新成功: ID ${record_id} → ${value}"
     else
-        msg=$(json_message "$resp")
-        err "${msg:-更新记录失败}"
+        _api_error "更新记录失败" "$resp"
     fi
 }
 
@@ -629,8 +642,7 @@ dns_delete_record() {
     if [[ "$st" == "success" ]]; then
         ok "记录已删除: ID ${record_id}"
     else
-        msg=$(json_message "$resp")
-        err "${msg:-删除记录失败}"
+        _api_error "删除记录失败" "$resp"
     fi
 }
 
@@ -706,8 +718,7 @@ ddns_update() {
     if [[ "$st" == "success" ]]; then
         ok "DDNS 更新成功: ${record_name}.${domain} → ${record_value}"
     else
-        msg=$(json_message "$resp")
-        err "${msg:-DDNS 更新失败}"
+        _api_error "DDNS 更新失败" "$resp"
     fi
 }
 
@@ -728,8 +739,7 @@ cert_list() {
     st=$(json_status "$resp")
 
     if [[ "$st" != "success" ]]; then
-        msg=$(json_message "$resp")
-        err "${msg:-获取证书列表失败}"
+        _api_error "获取证书列表失败" "$resp"
         return 1
     fi
 
@@ -831,8 +841,7 @@ cert_download() {
     st=$(json_status "$resp")
 
     if [[ "$st" != "success" ]]; then
-        msg=$(json_message "$resp")
-        err "${msg:-下载失败}"
+        _api_error "下载失败" "$resp"
         return 1
     fi
 
@@ -894,8 +903,7 @@ cert_renew() {
         ok "证书续签请求已提交: ${domain}"
         info "证书签发可能需要几分钟，请稍后查看证书列表确认状态"
     else
-        msg=$(json_message "$resp")
-        err "${msg:-续签失败}"
+        _api_error "续签失败" "$resp"
     fi
 }
 
@@ -943,6 +951,30 @@ settings_view() {
     info "版本:     v${VERSION}"
 }
 
+settings_test_connection() {
+    echo ""; _section "连接测试"; echo ""
+
+    if [[ -z "$API_KEY" ]]; then
+        warn "尚未配置 API Key，无法测试"
+        return 1
+    fi
+
+    info "正在测试 API 连接..."
+    local resp
+    resp=$(api_post "${DNS_API}/domain_list")
+    local st
+    st=$(json_status "$resp")
+
+    if [[ "$st" == "success" ]]; then
+        local count
+        count=$(json_data_count "$resp")
+        ok "API 连接正常"
+        info "当前账户下有 ${count} 个 DNS 域名"
+    else
+        _api_error "API 连接失败" "$resp"
+    fi
+}
+
 ###############################################################################
 # Submenus
 ###############################################################################
@@ -963,7 +995,7 @@ menu_settings() {
         case "$choice" in
             1) settings_api_key; _press_any_key ;;
             2) settings_view; _press_any_key ;;
-            3) info "状态页面: ${STATUS_URL}" ;;
+            3) settings_test_connection; _press_any_key ;;
             0|"") return ;;
             *) warn "无效选项"; sleep 1 ;;
         esac
