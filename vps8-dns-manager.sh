@@ -366,8 +366,8 @@ _self_install() {
     if [[ -w /usr/local/bin ]] || [[ -w /usr/bin ]]; then
         local link_dir="/usr/local/bin"
         [[ ! -w "$link_dir" ]] && link_dir="/usr/bin"
-        ln -sf "$target" "${link_dir}/vps8-dns" 2>/dev/null && \
-            info "已创建快捷命令: vps8-dns"
+        ln -sf "$target" "${link_dir}/vps8" 2>/dev/null && \
+            info "已创建快捷命令: vps8"
     fi
 }
 
@@ -687,77 +687,217 @@ dns_delete_record() {
 ###############################################################################
 # DDNS Operations
 ###############################################################################
+readonly DDNS_DIR="${HOME}/.vps8-ddns"
+readonly DDNS_RULES="${DDNS_DIR}/rules.list"
+readonly DDNS_LOG="${DDNS_DIR}/ddns.log"
+readonly DDNS_UPDATE="${DDNS_DIR}/update.sh"
+
 ddns_update() {
     echo ""; _section "DDNS 动态 IP 更新"; echo ""
 
-    local domain record_name record_type record_value ttl
+    local domain record_name record_type ttl
 
-    domain=$(ask "域名 (如 example.com 或 sub.example.com)")
+    domain=$(ask "域名")
     [[ -z "$domain" ]] && { warn "未输入域名"; return 1; }
     is_domain "$domain" || { err "无效域名"; return 1; }
 
-    record_name=$(ask "记录名" "@")
+    record_name=$(ask "记录名 (支持逗号分隔多个, 如 @,www,mail)" "@")
     record_type=$(ask "记录类型 (A/AAAA)" "A")
     record_type=$(echo "$record_type" | tr '[:lower:]' '[:upper:]')
-
-    if [[ "$record_type" != "A" && "$record_type" != "AAAA" ]]; then
-        err "DDNS 仅支持 A 或 AAAA 记录类型"
-        return 1
-    fi
-
-    record_value=$(ask "IP 地址 (留空则自动获取当前公网 IP)")
-
-    # Auto-detect public IP
-    if [[ -z "$record_value" ]]; then
-        info "正在检测公网 IP..."
-        if [[ "$record_type" == "A" ]]; then
-            record_value=$(curl -sS --max-time 5 https://api.ipify.org 2>/dev/null \
-                || curl -sS --max-time 5 https://ifconfig.me 2>/dev/null \
-                || curl -sS --max-time 5 https://ip.sb 2>/dev/null)
-        else
-            record_value=$(curl -sS --max-time 5 https://api6.ipify.org 2>/dev/null \
-                || curl -sS --max-time 5 https://ifconfig.me 2>/dev/null)
-        fi
-        if [[ -z "$record_value" ]]; then
-            err "无法获取公网 IP，请手动输入"
-            return 1
-        fi
-        ok "检测到公网 IP: ${record_value}"
-    fi
-
-    # Validate IP
-    if [[ "$record_type" == "A" ]]; then
-        is_ipv4 "$record_value" || { err "无效 IPv4: $record_value"; return 1; }
-    else
-        is_ipv6 "$record_value" || { err "无效 IPv6: $record_value"; return 1; }
-    fi
+    [[ "$record_type" != "A" && "$record_type" != "AAAA" ]] && { err "DDNS 仅支持 A/AAAA"; return 1; }
 
     ttl=$(ask "TTL (秒)" "300")
     is_number "$ttl" || ttl=300
 
-    # Confirm
+    # IP source mode: "source" = let API detect request IP (most reliable)
+    local ip_source="source"
+    if [[ "$record_type" == "AAAA" ]]; then
+        ip_source="external"
+    fi
+
     echo ""
-    info "DDNS 更新详情:"
+    info "DDNS 配置:"
     printf "    域名:     %s\n" "$domain"
     printf "    记录名:   %s\n" "$record_name"
     printf "    类型:     %s\n" "$record_type"
-    printf "    IP:       %s\n" "$record_value"
+    printf "    IP 模式:  %s\n" "$ip_source"
     printf "    TTL:      %s\n" "$ttl"
     echo ""
-    confirm "确认更新?" "y" || { info "已取消"; return 0; }
+    confirm "确认安装 DDNS 自动更新?" "y" || { info "已取消"; return 0; }
 
-    local resp
-    resp=$(api_post "${DDNS_API}/ddns_update" \
-        domain "$domain" record_name "$record_name" record_type "$record_type" \
-        record_value "$record_value" ttl "$ttl")
-    local st msg
-    st=$(json_status "$resp")
+    # Install DDNS updater
+    _ddns_install "$domain" "$record_type" "$record_name" "$ttl" "$ip_source"
+}
 
-    if [[ "$st" == "success" ]]; then
-        ok "DDNS 更新成功: ${record_name}.${domain} → ${record_value}"
+_ddns_install() {
+    local domain="$1" rtype="$2" hosts="$3" ttl="$4" ip_source="$5"
+
+    mkdir -p "$DDNS_DIR"
+
+    # Write/update rules.list (domain|type|hosts|ttl|ip_source)
+    local rule="${domain}|${rtype}|${hosts}|${ttl}|${ip_source}"
+    if [[ -f "$DDNS_RULES" ]]; then
+        # Remove existing rule for same domain+type
+        local existing
+        existing=$(grep -v "^${domain}|${rtype}|" "$DDNS_RULES" 2>/dev/null || true)
+        printf '%s\n%s\n' "$existing" "$rule" > "$DDNS_RULES"
     else
-        _api_error "DDNS 更新失败" "$resp"
+        echo "$rule" > "$DDNS_RULES"
     fi
+    chmod 600 "$DDNS_RULES"
+
+    # Write config.env
+    cat > "${DDNS_DIR}/config.env" <<CONF
+API_KEY="${API_KEY}"
+API_URL="${API_BASE}"
+CONF
+    chmod 600 "${DDNS_DIR}/config.env"
+
+    # Generate update.sh
+    _ddns_generate_update_script
+
+    chmod 700 "$DDNS_UPDATE"
+
+    # Install cron (*/5 = every 5 minutes)
+    local cron_marker="$DDNS_UPDATE"
+    local existing_cron
+    existing_cron=$(crontab -l 2>/dev/null || true)
+    existing_cron=$(echo "$existing_cron" | grep -vF "$cron_marker" || true)
+    printf '%s\n*/5 * * * * %s >/dev/null 2>&1\n' "$existing_cron" "$DDNS_UPDATE" | crontab -
+
+    # Generate uninstall.sh
+    cat > "${DDNS_DIR}/uninstall.sh" <<'UNINSTALL'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CRON_MARKER="$SCRIPT_DIR/update.sh"
+CURRENT_CRON="$(crontab -l 2>/dev/null || true)"
+NEW_CRON="$(echo "$CURRENT_CRON" | grep -Fv "$CRON_MARKER" || true)"
+echo "$NEW_CRON" | crontab -
+rm -rf "$SCRIPT_DIR"
+echo "DDNS 已卸载"
+UNINSTALL
+    chmod 700 "${DDNS_DIR}/uninstall.sh"
+
+    # Run once now
+    info "正在执行首次 DDNS 更新..."
+    bash "$DDNS_UPDATE"
+    local rc=$?
+
+    if (( rc == 0 )); then
+        ok "DDNS 自动更新已安装"
+    else
+        warn "首次更新返回非零状态，请检查日志: $DDNS_LOG"
+    fi
+
+    echo ""
+    info "配置文件: ${DDNS_DIR}/config.env"
+    info "规则文件: ${DDNS_RULES}"
+    info "更新脚本: ${DDNS_UPDATE}"
+    info "日志文件: ${DDNS_LOG}"
+    info "每 5 分钟自动检测 IP 并更新"
+    info "卸载: bash ${DDNS_DIR}/uninstall.sh"
+}
+
+_ddns_generate_update_script() {
+    cat > "$DDNS_UPDATE" <<'UPDATER'
+#!/usr/bin/env bash
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG="$SCRIPT_DIR/config.env"
+RULES="$SCRIPT_DIR/rules.list"
+LOG="$SCRIPT_DIR/ddns.log"
+
+[[ -f "$CONFIG" ]] || { echo "$(date): config.env missing" >> "$LOG"; exit 1; }
+[[ -f "$RULES" ]] || { echo "$(date): rules.list missing" >> "$LOG"; exit 1; }
+
+# shellcheck source=/dev/null
+source "$CONFIG"
+
+log_line() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
+
+get_public_ip() {
+    local t="$1"
+    if [[ "$t" == "AAAA" ]]; then
+        curl -sS -6 --max-time 10 https://api6.ipify.org 2>/dev/null \
+            || curl -sS --max-time 10 https://v6.ifconfig.me 2>/dev/null
+    else
+        curl -sS -4 --max-time 10 https://api.ipify.org 2>/dev/null \
+            || curl -sS --max-time 10 https://ifconfig.me 2>/dev/null
+    fi
+}
+
+trim() { echo "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+
+ALL_OK=1
+
+while IFS='|' read -r DOMAIN TYPE HOSTS TTL IP_SOURCE; do
+    [[ -z "$DOMAIN" ]] && continue
+    TYPE="$(trim "$TYPE")"
+    HOSTS="$(trim "$HOSTS")"
+    TTL="$(trim "$TTL")"
+    IP_SOURCE="$(echo "$(trim "$IP_SOURCE")" | tr '[:upper:]' '[:lower:]')"
+    [[ -z "$IP_SOURCE" || "$IP_SOURCE" == "auto" ]] && {
+        [[ "$TYPE" == "AAAA" ]] && IP_SOURCE="external" || IP_SOURCE="source"
+    }
+
+    CURRENT_IP=""
+    if [[ "$IP_SOURCE" == "external" ]]; then
+        CURRENT_IP="$(get_public_ip "$TYPE")"
+        if [[ -z "$CURRENT_IP" ]]; then
+            log_line "FAIL domain=$DOMAIN: no public IP detected"
+            ALL_OK=0; continue
+        fi
+    fi
+
+    # Check IP cache — skip if unchanged
+    CACHE_FILE="$SCRIPT_DIR/.last_ip_${DOMAIN}_${TYPE}"
+    if [[ -n "$CURRENT_IP" ]] && [[ -f "$CACHE_FILE" ]]; then
+        OLD_IP="$(cat "$CACHE_FILE" 2>/dev/null)"
+        if [[ "$CURRENT_IP" == "$OLD_IP" ]]; then
+            continue  # IP unchanged, skip
+        fi
+    fi
+
+    IFS=', ' read -r -a HOST_ARRAY <<< "$HOSTS"
+    CURL_IP_OPTS=()
+    if [[ "$IP_SOURCE" == "source" ]]; then
+        [[ "$TYPE" == "AAAA" ]] && CURL_IP_OPTS+=("-6") || CURL_IP_OPTS+=("-4")
+    fi
+
+    for raw_host in "${HOST_ARRAY[@]}"; do
+        host="$(trim "$raw_host")"
+        [[ -z "$host" ]] && continue
+
+        if [[ -n "$CURRENT_IP" ]]; then
+            PAYLOAD=$(printf '{"domain":"%s","record_name":"%s","record_type":"%s","record_value":"%s","ttl":%s}' \
+                "$DOMAIN" "$host" "$TYPE" "$CURRENT_IP" "$TTL")
+        else
+            PAYLOAD=$(printf '{"domain":"%s","record_name":"%s","record_type":"%s","ttl":%s}' \
+                "$DOMAIN" "$host" "$TYPE" "$TTL")
+        fi
+
+        TMP="$(mktemp)"
+        HTTP_CODE=$(curl "${CURL_IP_OPTS[@]}" -sS --max-time 20 \
+            -u "client:${API_KEY}" \
+            -H "Content-Type: application/json" \
+            -X POST "${API_URL}/api/client/servicedns/ddns_update" \
+            -d "$PAYLOAD" -o "$TMP" -w '%{http_code}' 2>/dev/null) || true
+        BODY="$(cat "$TMP" 2>/dev/null || true)"
+        rm -f "$TMP"
+
+        if [[ "$HTTP_CODE" == "200" ]] && echo "$BODY" | grep -q '"error":null'; then
+            log_line "OK domain=$DOMAIN host=$host type=$TYPE ip_source=$IP_SOURCE ip=${CURRENT_IP:-source}"
+            [[ -n "$CURRENT_IP" ]] && echo "$CURRENT_IP" > "$CACHE_FILE"
+        else
+            log_line "FAIL domain=$DOMAIN host=$host type=$TYPE http=$HTTP_CODE body=$BODY"
+            ALL_OK=0
+        fi
+    done
+done < "$RULES"
+
+[[ "$ALL_OK" -eq 1 ]] && exit 0 || exit 1
+UPDATER
 }
 
 ###############################################################################
@@ -1333,30 +1473,33 @@ cli_dispatch() {
 
         # DDNS
         ddns)
-            [[ $# -lt 1 ]] && { err "用法: ddns <domain> [type] [value] [name] [ttl]"; return 1; }
-            local domain="$1" rtype="${2:-A}" value="${3:-}" rname="${4:-@}" ttl="${5:-300}"
+            # If DDNS updater is installed, just run it
+            if [[ -x "$DDNS_UPDATE" ]]; then
+                bash "$DDNS_UPDATE"
+                exit $?
+            fi
+            # One-time update using source mode (no record_value = API uses request IP)
+            [[ $# -lt 1 ]] && { err "用法: ddns <domain> [type] [name] [ttl]"; return 1; }
+            local domain="$1" rtype="${2:-A}" rname="${3:-@}" ttl="${4:-300}"
             rtype=$(echo "$rtype" | tr '[:lower:]' '[:upper:]')
             is_domain "$domain" || { err "无效域名"; return 1; }
-            [[ "$rtype" != "A" && "$rtype" != "AAAA" ]] && { err "DDNS 仅支持 A/AAAA"; return 1; }
-            # Auto-detect IP if not provided
-            if [[ -z "$value" ]]; then
-                if [[ "$rtype" == "A" ]]; then
-                    value=$(curl -sS --max-time 5 https://api.ipify.org 2>/dev/null \
-                        || curl -sS --max-time 5 https://ifconfig.me 2>/dev/null)
-                else
-                    value=$(curl -sS --max-time 5 https://api6.ipify.org 2>/dev/null)
-                fi
-                [[ -z "$value" ]] && { err "无法获取公网 IP"; return 1; }
-            fi
-            local body
-            body=$(printf '{"domain":"%s","record_name":"%s","record_type":"%s","record_value":"%s","ttl":%s}' \
-                "$domain" "$rname" "$rtype" "$value" "$ttl")
-            local resp
-            resp=$(api_post "${DDNS_API}/ddns_update" "$body")
-            if [[ "$(json_status "$resp")" == "success" ]]; then
-                ok "DDNS: ${rname}.${domain} → ${value} (${rtype})"
+            local curl_opts=()
+            [[ "$rtype" == "AAAA" ]] && curl_opts+=("-6") || curl_opts+=("-4")
+            local payload
+            payload=$(printf '{"domain":"%s","record_name":"%s","record_type":"%s","ttl":%s}' \
+                "$domain" "$rname" "$rtype" "$ttl")
+            local tmp http_code body
+            tmp=$(mktemp)
+            http_code=$(curl "${curl_opts[@]}" -sS --max-time 20 \
+                -u "client:${API_KEY}" -H "Content-Type: application/json" \
+                -X POST "${DDNS_API}/ddns_update" \
+                -d "$payload" -o "$tmp" -w '%{http_code}' 2>/dev/null) || true
+            body=$(cat "$tmp" 2>/dev/null || true)
+            rm -f "$tmp"
+            if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"error":null'; then
+                ok "DDNS: ${rname}.${domain} updated (${rtype}, source IP)"
             else
-                err "$(json_message "$resp")"
+                err "DDNS 失败: http=$http_code"
                 return 1
             fi
             ;;
@@ -1488,7 +1631,7 @@ menu_main() {
         echo ""
 
         _section "DDNS"
-        echo -e "  ${GREEN}[6]${NC} DDNS 动态 IP 更新"
+        echo -e "  ${GREEN}[6]${NC} DDNS 动态 IP (自动检测+定时更新)"
         echo ""
 
         _section "证书管理"
