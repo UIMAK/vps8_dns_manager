@@ -1465,10 +1465,10 @@ cli_usage() {
     cert-download <domain> [type]
                                 下载证书 (fullchain/cert/privkey)
     cert-renew <domain>         续签证书
-    cert-sync                   同步所有已下载证书 (适合 cron)
+    cert-sync [domain]          同步已下载证书 (可选指定域名, 适合 cron)
 
   设置:
-    set-key <api_key>           配置 API Key
+    set-key [api_key]           配置 API Key (建议: echo 'KEY' | script set-key)
     install                     安装脚本到 ~/.vps8-dns-manager/
     update                      从 GitHub 更新到最新版本
     status                      查看状态信息
@@ -1535,11 +1535,9 @@ cli_dispatch() {
             rtype=$(echo "$rtype" | tr '[:lower:]' '[:upper:]')
             is_domain "$domain" || { err "无效域名"; return 1; }
             is_record_type "$rtype" || { err "不支持的类型: $rtype"; return 1; }
-            local body
-            body=$(printf '{"domain":"%s","host":"%s","type":"%s","value":"%s","ttl":%s}' \
-                "$domain" "$host" "$rtype" "$value" "$ttl")
             local resp
-            resp=$(api_post "${DNS_API}/record_create" "$body")
+            resp=$(api_post "${DNS_API}/record_create" \
+                domain "$domain" host "$host" type "$rtype" value "$value" ttl "$ttl")
             if [[ "$(json_status "$resp")" == "success" ]]; then
                 ok "Created: ${host}.${domain} ${rtype} ${value}"
             else
@@ -1552,11 +1550,9 @@ cli_dispatch() {
             local domain="$1" rid="$2" value="$3" ttl="${4:-600}"
             is_domain "$domain" || { err "无效域名"; return 1; }
             is_number "$rid" || { err "无效 ID"; return 1; }
-            local body
-            body=$(printf '{"domain":"%s","id":%s,"value":"%s","ttl":%s}' \
-                "$domain" "$rid" "$value" "$ttl")
             local resp
-            resp=$(api_post "${DNS_API}/record_update" "$body")
+            resp=$(api_post "${DNS_API}/record_update" \
+                domain "$domain" id "$rid" value "$value" ttl "$ttl")
             if [[ "$(json_status "$resp")" == "success" ]]; then
                 ok "Updated: ID ${rid} → ${value}"
             else
@@ -1569,10 +1565,8 @@ cli_dispatch() {
             local domain="$1" rid="$2"
             is_domain "$domain" || { err "无效域名"; return 1; }
             is_number "$rid" || { err "无效 ID"; return 1; }
-            local body
-            body=$(printf '{"domain":"%s","id":%s}' "$domain" "$rid")
             local resp
-            resp=$(api_post "${DNS_API}/record_delete" "$body")
+            resp=$(api_post "${DNS_API}/record_delete" domain "$domain" id "$rid")
             if [[ "$(json_status "$resp")" == "success" ]]; then
                 ok "Deleted: ID ${rid}"
             else
