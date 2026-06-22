@@ -33,7 +33,6 @@ fi
 ###############################################################################
 _cleanup() {
     local ec=$?
-    [[ -f "${CONFIG_DIR}/.netrc.tmp" ]] && rm -f "${CONFIG_DIR}/.netrc.tmp"
     printf "\r\033[K" 2>/dev/null  # clear spinner line
     exit "$ec"
 }
@@ -343,18 +342,13 @@ config_save_key() {
 # api_post <url> <body> [content_type]
 api_post() {
     local url="$1" body="${2:-{}}" ctype="${3:-application/json}"
-    local netrc="${CONFIG_DIR}/.netrc.tmp"
-    printf "machine %s login client password %s\n" \
-        "$(echo "$url" | sed 's|https\?://||;s|/.*||')" "$API_KEY" > "$netrc"
-    chmod 600 "$netrc"
 
     local resp http_code
     resp=$(curl -sS -w '\n__HTTP_%{http_code}__' \
-        --netrc-file "$netrc" \
+        -u "client:${API_KEY}" \
         -H "Content-Type: $ctype" \
         -X POST "$url" -d "$body" 2>&1)
     local rc=$?
-    rm -f "$netrc"
 
     if (( rc != 0 )); then
         _log ERROR "curl failed ($rc): $resp"
