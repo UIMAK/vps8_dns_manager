@@ -99,8 +99,8 @@ ask() {
 
 ask_secure() {
     local prompt="$1" result
-    printf "  %s: " "$prompt"
-    read -rs result; echo ""
+    printf "  %s: " "$prompt" >&2
+    read -rs result; echo "" >&2
     echo "$result"
 }
 
@@ -1307,6 +1307,29 @@ main() {
     if [[ $# -gt 0 ]]; then
         cli_dispatch "$@"
     else
+        # Interactive mode: prompt for API key on first run
+        if [[ -z "$API_KEY" ]]; then
+            clear
+            _print_logo
+            echo ""
+            warn "尚未配置 API Key"
+            echo ""
+            info "获取方式:"
+            printf "    1. 登录 ${CYAN}%s${NC}\n" "$API_BASE"
+            printf "    2. 打开 ${BOLD}Account / Profile${NC} 设置\n"
+            printf "    3. 找到 ${BOLD}API Key${NC} 区域，生成或复制 Key\n"
+            echo ""
+            local new_key
+            new_key=$(ask_secure "请输入 API Key")
+            if [[ -n "$new_key" ]]; then
+                config_save_key "$new_key"
+                ok "API Key 已保存"
+                sleep 1
+            else
+                warn "未输入 API Key，部分功能不可用"
+                sleep 2
+            fi
+        fi
         menu_main
     fi
 }
