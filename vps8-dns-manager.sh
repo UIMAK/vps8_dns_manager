@@ -214,7 +214,7 @@ json_get() {
             exit
         }
     }')
-    echo "$val"
+    printf '%s\n' "$val"
 }
 
 # Extract the "result" field content from JSON response
@@ -273,15 +273,20 @@ json_data_count() {
     echo "${c:-0}"
 }
 
-# Extract a field value from the Nth object (0-indexed) in the result array
-# Searches directly in the full JSON — does NOT depend on json_data_raw
-# Usage: json_data_field "$json" 0 "domain"
+# Extract the Nth field value from a JSON result array
+# Uses json_data_raw to scope search to the "result" array, avoiding
+# false matches from fields with the same name outside the result.
 json_data_field() {
     local json="$1" idx="$2" field="$3"
 
-    # Find all occurrences of "field": in the JSON
+    # Scope to result array to avoid field name collisions with top-level keys
+    local haystack
+    haystack=$(json_data_raw "$json")
+    [[ -z "$haystack" ]] && { echo ""; return; }
+
+    # Find all occurrences of "field": in the result array
     local search_key="\"${field}\":"
-    local after="${json#*${search_key}}"
+    local after="${haystack#*${search_key}}"
 
     # Skip to the Nth occurrence
     local i
@@ -347,7 +352,7 @@ json_message() {
 # String Helpers
 ###############################################################################
 
-# Safely unescape JSON escape sequences — handles only \n \r \t \\ \"
+# Safely unescape JSON escape sequences — handles \/ \\ \n \r \t \"
 # Unlike printf '%b', does NOT interpret \0NNN, \xHH, \c (stop), etc.
 #
 # Pattern caveat: in ${var//pattern/replacement}, the pattern is parsed as a
@@ -356,14 +361,21 @@ json_message() {
 # parse to literal `\\n` (3 chars) and only match 2 backslashes + n, which
 # the vps8 API never returns — that's why the previous 4-backslash form was a
 # silent no-op and PEM files ended up as a single line of literal `\n`.
+#
+# \/ → / is handled before \\ to avoid incorrectly expanding \\/ (escaped
+# backslash before literal forward slash) into /.  Order matters:
+#   \/ → /  (JSON-escaped solidus → literal /)
+#   \\ → \  (escaped backslash → literal \)
+#   then \n \r \t \" → their respective control/literal characters
 _json_unescape() {
     local s="$1"
+    s="${s//\\\///}"
     s="${s//\\\\/$'\\'}"
     s="${s//\\n/$'\n'}"
     s="${s//\\r/$'\r'}"
     s="${s//\\t/$'\t'}"
     s="${s//\\\"/\"}"
-    echo "$s"
+    printf '%s\n' "$s"
 }
 
 # Extract PEM certificate content from API response
@@ -377,7 +389,7 @@ _extract_pem_content() {
     if [[ -z "$content" ]] && echo "$resp" | grep -q "BEGIN"; then
         content="$resp"
     fi
-    echo "$content"
+    printf '%s\n' "$content"
 }
 
 # Atomically write certificate file — write to .tmp then mv (prevents partial reads)
@@ -444,11 +456,23 @@ _self_install() {
     local target_dir="$INSTALL_DIR"
     local target="$INSTALL_PATH"
     local source
-    source="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    # Resolve symlinks to get real script path (portable readlink fallback)
+    source=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")")
 
     # Already installed at the target location
     if [[ "$source" == "$target" ]]; then
         return 0
+    fi
+
+    # If paths differ but files are identical (e.g., symlink resolution failed
+    # or running from a copy), skip reinstall.  Uses sha256sum or md5sum.
+    if [[ -f "$target" ]]; then
+        local src_hash tgt_hash
+        src_hash=$(sha256sum "$source" 2>/dev/null | cut -d' ' -f1 || md5sum "$source" 2>/dev/null | cut -d' ' -f1)
+        tgt_hash=$(sha256sum "$target" 2>/dev/null | cut -d' ' -f1 || md5sum "$target" 2>/dev/null | cut -d' ' -f1)
+        if [[ -n "$src_hash" && "$src_hash" == "$tgt_hash" ]]; then
+            return 0
+        fi
     fi
 
     echo ""
@@ -491,7 +515,7 @@ _api_error() {
         # Show truncated raw response for debugging (redact PEM content)
         local raw="${resp:0:300}"
         if [[ -n "$raw" ]]; then
-            if echo "$raw" | grep -q "BEGIN CERTIFICATE"; then
+            if printf '%s' "$raw" | grep -q "BEGIN CERTIFICATE"; then
                 info "原始响应: [PEM 内容已隐藏]"
             else
                 info "原始响应: $raw"
@@ -535,7 +559,7 @@ api_post() {
         429) echo "{\"result\":null,\"error\":\"请求过于频繁 (HTTP 429)，请稍后再试\"}" ;;
         401|403) echo "{\"result\":null,\"error\":\"认证失败: API Key 无效或已过期 (HTTP ${http_code})\"}" ;;
         000|"") echo "{\"result\":null,\"error\":\"无法连接服务器，请检查网络\"}" ;;
-        *) echo "$resp" ;;
+        *) printf '%s\n' "$resp" ;;
     esac
 }
 
@@ -550,14 +574,14 @@ api_post_retry() {
         local st
         st=$(json_status "$resp")
         if [[ "$st" == "success" ]]; then
-            echo "$resp"; return 0
+            printf '%s\n' "$resp"; return 0
         fi
         if (( i < max_retries )); then
             local wait=$(( i * 2 ))
             _log WARN "Attempt $i failed, retrying in ${wait}s..."
             sleep "$wait"
         else
-            echo "$resp"; return 1
+            printf '%s\n' "$resp"; return 1
         fi
     done
 }
@@ -1604,25 +1628,36 @@ cli_dispatch() {
             local payload
             payload=$(printf '{"domain":"%s","record_name":"%s","record_type":"%s","ttl":%s}' \
                 "$domain" "$rname" "$rtype" "$ttl")
+
+            # Retry loop (matching api_post_retry pattern)
+            local max_retries=${API_MAX_RETRIES} attempt
             local tmp netrc http_code body
-            tmp=$(mktemp)
-            _register_temp "$tmp"
-            netrc=$(mktemp)
-            _register_temp "$netrc"
-            printf 'machine %s login client password %s\n' "${API_BASE#https://}" "$API_KEY" > "$netrc"
-            chmod 600 "$netrc"
-            http_code=$(curl "${curl_opts[@]}" -sS --max-time 20 \
-                --netrc-file "$netrc" -H "Content-Type: application/json" \
-                -X POST "${DDNS_API}/ddns_update" \
-                -d "$payload" -o "$tmp" -w '%{http_code}' 2>/dev/null) || true
-            body=$(cat "$tmp" 2>/dev/null || true)
-            rm -f "$tmp" "$netrc"
-            if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"error":null'; then
-                ok "DDNS: ${rname}.${domain} updated (${rtype}, source IP)"
-            else
-                err "DDNS 失败: http=$http_code"
-                return 1
-            fi
+            for ((attempt=1; attempt<=max_retries; attempt++)); do
+                tmp=$(mktemp)
+                _register_temp "$tmp"
+                netrc=$(mktemp)
+                _register_temp "$netrc"
+                printf 'machine %s login client password %s\n' "${API_BASE#https://}" "$API_KEY" > "$netrc"
+                chmod 600 "$netrc"
+                http_code=$(curl "${curl_opts[@]}" -sS --max-time 20 \
+                    --netrc-file "$netrc" -H "Content-Type: application/json" \
+                    -X POST "${DDNS_API}/ddns_update" \
+                    -d "$payload" -o "$tmp" -w '%{http_code}' 2>/dev/null) || true
+                body=$(cat "$tmp" 2>/dev/null || true)
+                rm -f "$tmp" "$netrc"
+
+                if [[ "$http_code" == "200" ]] && printf '%s' "$body" | grep -q '"error":null'; then
+                    ok "DDNS: ${rname}.${domain} updated (${rtype}, source IP)"
+                    return 0
+                fi
+                if (( attempt < max_retries )); then
+                    local wait=$(( attempt * 2 ))
+                    _log WARN "DDNS attempt $attempt failed (http=$http_code), retrying in ${wait}s..."
+                    sleep "$wait"
+                fi
+            done
+            err "DDNS 失败: http=$http_code (after $max_retries attempts)"
+            return 1
             ;;
 
         # Certs
@@ -1633,7 +1668,25 @@ cli_dispatch() {
             local resp
             resp=$(api_post "${CERT_API}/list" domain "$domain")
             if [[ "$(json_status "$resp")" == "success" ]]; then
-                printf "%s\n" "$resp"
+                local dtype
+                dtype=$(json_data_type "$resp")
+                if [[ "$dtype" == "object" ]]; then
+                    # Single cert — print key fields
+                    local id cn expiry st
+                    id=$(json_get "$resp" "cert_id")
+                    [[ -z "$id" ]] && id=$(json_get "$resp" "id")
+                    cn=$(json_get "$resp" "common_name")
+                    [[ -z "$cn" ]] && cn=$(json_get "$resp" "domain")
+                    expiry=$(json_get "$resp" "not_after")
+                    [[ -z "$expiry" ]] && expiry=$(json_get "$resp" "expiry")
+                    st=$(json_get "$resp" "status")
+                    [[ -z "$st" ]] && st=$(json_get "$resp" "state")
+                    printf "ID: %s\nDomain: %s\nExpiry: %s\nStatus: %s\n" \
+                        "${id:-N/A}" "${cn:-N/A}" "${expiry:-N/A}" "${st:-N/A}"
+                else
+                    # Array or unknown — fall back to raw JSON
+                    printf "%s\n" "$resp"
+                fi
             else
                 err "$(json_message "$resp")"
                 return 1
@@ -1669,6 +1722,12 @@ cli_dispatch() {
             [[ $# -lt 1 ]] && { err "用法: cert-renew <domain>"; return 1; }
             local domain="$1"
             is_domain "$domain" || { err "无效域名"; return 1; }
+            # Confirm when running interactively; skip when piped/scripted
+            if [[ -t 0 ]]; then
+                local ans
+                read -rp "  确认续签 ${domain} 的证书? (y/N): " ans
+                [[ "$ans" =~ ^[Yy] ]] || { info "已取消"; return 0; }
+            fi
             local resp
             resp=$(api_post_retry "${CERT_API}/renew" domain "$domain")
             if [[ "$(json_status "$resp")" == "success" ]]; then
