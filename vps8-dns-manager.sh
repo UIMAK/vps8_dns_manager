@@ -148,8 +148,7 @@ confirm() {
 
 _press_any_key() {
     echo ""
-    echo -e "  ${YELLOW}按回车键继续...${NC}"
-    read -r
+    read -rp "  ${YELLOW}按回车键继续...${NC}"
 }
 
 # Spinner
