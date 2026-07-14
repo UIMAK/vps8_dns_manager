@@ -600,7 +600,8 @@ is_ipv4() {
     local o IFS='.'; read -ra o <<< "$1"
     [[ ${#o[@]} -eq 4 ]] || return 1
     for o in "${o[@]}"; do
-        [[ "$o" =~ ^[0-9]+$ ]] && (( o >= 0 && o <= 255 )) || return 1
+        [[ "$o" =~ ^[0-9]+$ ]] || return 1
+        (( 10#$o >= 0 && 10#$o <= 255 )) || return 1
     done
 }
 is_ipv6() {
@@ -1228,7 +1229,11 @@ _cert_cron_add() {
     existing=$(echo "$existing" | sed '/^[[:space:]]*$/d')
 
     # Add new entry
-    printf '%s\n%s %s\n' "$existing" "$cron_cmd" "$cron_tag" | crontab -
+    if [[ -n "$existing" ]]; then
+        printf '%s\n%s %s\n' "$existing" "$cron_cmd" "$cron_tag" | crontab -
+    else
+        printf '%s %s\n' "$cron_cmd" "$cron_tag" | crontab -
+    fi
     ok "已设置每日 $(printf '%02d:%02d' "$cron_hour" "$cron_min") 自动更新 ${domain} 的证书"
     info "查看: crontab -l"
     info "删除: crontab -l | grep -vF '${cron_tag}' | crontab -"
@@ -1296,7 +1301,11 @@ cert_cron_manage() {
         updated=$(echo "$existing_cron" | grep -vF "cert-sync ${domain}")
         updated=$(echo "$updated" | grep -vF "$tag")
         updated=$(echo "$updated" | sed '/^[[:space:]]*$/d')
-        echo "$updated" | crontab -
+        if [[ -n "$updated" ]]; then
+            echo "$updated" | crontab -
+        else
+            crontab -r 2>/dev/null || true
+        fi
         ok "${domain} 自动更新已关闭"
     else
         # Enable: add cron entry
@@ -1773,13 +1782,25 @@ cli_dispatch() {
             ;;
         update)
             info "正在从 GitHub 更新..."
-            local tmp_file
+            local tmp_file checksum_file
             tmp_file=$(mktemp)
             _register_temp "$tmp_file"
             if curl -fsSL "$RAW_URL" -o "$tmp_file" 2>/dev/null; then
                 if ! bash -n "$tmp_file" 2>/dev/null; then
                     err "下载的文件语法检查失败，已取消更新"
                     return 1
+                fi
+                # SHA-256 integrity check (soft — skip if checksum file not published)
+                checksum_file=$(mktemp)
+                _register_temp "$checksum_file"
+                if curl -fsSL "${RAW_URL}.sha256" -o "$checksum_file" 2>/dev/null; then
+                    local expected actual
+                    expected=$(awk '{print $1}' "$checksum_file" 2>/dev/null)
+                    actual=$(sha256sum "$tmp_file" 2>/dev/null | awk '{print $1}' || md5sum "$tmp_file" 2>/dev/null | awk '{print $1}')
+                    if [[ -n "$expected" && "$expected" != "$actual" ]]; then
+                        err "文件校验失败: 预期 $expected, 实际 $actual"
+                        return 1
+                    fi
                 fi
                 local target="$INSTALL_PATH"
                 [[ ! -f "$target" ]] && target="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
