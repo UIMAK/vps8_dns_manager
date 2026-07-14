@@ -246,7 +246,7 @@ json_data_raw() {
             }
         }
     }')
-    echo "$arr"
+    printf '%s\n' "$arr"
 }
 
 # Count objects in a JSON result array
@@ -534,7 +534,7 @@ api_post() {
     _register_temp "$netrc_file"
     printf 'machine %s login client password %s\n' "${API_BASE#https://}" "$API_KEY" > "$netrc_file"
     chmod 600 "$netrc_file"
-    local -a curl_args=(-sS --netrc-file "$netrc_file")
+    local -a curl_args=(-sS --netrc-file "$netrc_file" --max-time 30 --connect-timeout 10)
     while [[ $# -ge 2 ]]; do
         curl_args+=(--data-urlencode "${1}=${2}")
         shift 2
@@ -568,7 +568,7 @@ api_post() {
 api_post_retry() {
     local url="$1"; shift
     local -a args=("$@")
-    local max_retries=${API_MAX_RETRIES} resp
+    local max_retries=${API_MAX_RETRIES} resp i
     for ((i=1; i<=max_retries; i++)); do
         resp=$(api_post "$url" "${args[@]}")
         local st
@@ -577,9 +577,9 @@ api_post_retry() {
             printf '%s\n' "$resp"; return 0
         fi
         if (( i < max_retries )); then
-            local wait=$(( i * 2 ))
-            _log WARN "Attempt $i failed, retrying in ${wait}s..."
-            sleep "$wait"
+            local delay=$(( i * 2 ))
+            _log WARN "Attempt $i failed, retrying in ${delay}s..."
+            sleep "$delay"
         else
             printf '%s\n' "$resp"; return 1
         fi
@@ -597,7 +597,12 @@ is_record_type() {
     [[ "$t" =~ ^(A|AAAA|MX|CNAME|TXT|NS)$ ]]
 }
 is_ipv4() {
-    [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    local o IFS='.'; read -ra o <<< "$1"
+    [[ ${#o[@]} -eq 4 ]] || return 1
+    for o in "${o[@]}"; do
+        [[ "$o" =~ ^[0-9]+$ ]] || return 1
+        (( 10#$o >= 0 && 10#$o <= 255 )) || return 1
+    done
 }
 is_ipv6() {
     [[ "$1" =~ : ]] && [[ "$1" =~ ^[0-9a-fA-F:]+$ ]]
@@ -628,7 +633,7 @@ dns_list_domains() {
 
     local resp
     resp=$(api_post "${DNS_API}/domain_list")
-    local st msg
+    local st
     st=$(json_status "$resp")
 
     if [[ "$st" != "success" ]]; then
@@ -674,7 +679,7 @@ dns_list_records() {
 
     local resp
     resp=$(api_post "${DNS_API}/record_list" domain "$domain")
-    local st msg
+    local st
     st=$(json_status "$resp")
 
     if [[ "$st" != "success" ]]; then
@@ -755,7 +760,7 @@ dns_create_record() {
     local resp
     resp=$(api_post "${DNS_API}/record_create" \
         domain "$domain" host "$host" type "$rtype" value "$value" ttl "$ttl")
-    local st msg
+    local st
     st=$(json_status "$resp")
 
     if [[ "$st" == "success" ]]; then
@@ -785,7 +790,7 @@ dns_update_record() {
     local resp
     resp=$(api_post "${DNS_API}/record_update" \
         domain "$domain" id "$record_id" value "$value" ttl "$ttl")
-    local st msg
+    local st
     st=$(json_status "$resp")
 
     if [[ "$st" == "success" ]]; then
@@ -813,7 +818,7 @@ dns_delete_record() {
 
     local resp
     resp=$(api_post "${DNS_API}/record_delete" domain "$domain" id "$record_id")
-    local st msg
+    local st
     st=$(json_status "$resp")
 
     if [[ "$st" == "success" ]]; then
@@ -880,7 +885,11 @@ _ddns_install() {
         local existing escaped_domain
         escaped_domain="${domain//./\\.}"
         existing=$(grep -v "^${escaped_domain}|${rtype}|" "$DDNS_RULES" 2>/dev/null || true)
-        printf '%s\n%s\n' "$existing" "$rule" > "$DDNS_RULES"
+        if [[ -n "$existing" ]]; then
+            printf '%s\n%s\n' "$existing" "$rule" > "$DDNS_RULES"
+        else
+            printf '%s\n' "$rule" > "$DDNS_RULES"
+        fi
     else
         echo "$rule" > "$DDNS_RULES"
     fi
@@ -987,7 +996,11 @@ while IFS='|' read -r DOMAIN TYPE HOSTS TTL IP_SOURCE; do
     TTL="$(trim "$TTL")"
     IP_SOURCE="$(echo "$(trim "$IP_SOURCE")" | tr '[:upper:]' '[:lower:]')"
     [[ -z "$IP_SOURCE" || "$IP_SOURCE" == "auto" ]] && {
-        [[ "$TYPE" == "AAAA" ]] && IP_SOURCE="external" || IP_SOURCE="source"
+        if [[ "$TYPE" == "AAAA" ]]; then
+            IP_SOURCE="external"
+        else
+            IP_SOURCE="source"
+        fi
     }
 
     CURRENT_IP=""
@@ -1011,7 +1024,11 @@ while IFS='|' read -r DOMAIN TYPE HOSTS TTL IP_SOURCE; do
     IFS=',' read -r -a HOST_ARRAY <<< "$HOSTS"
     CURL_IP_OPTS=()
     if [[ "$IP_SOURCE" == "source" ]]; then
-        [[ "$TYPE" == "AAAA" ]] && CURL_IP_OPTS+=("-6") || CURL_IP_OPTS+=("-4")
+        if [[ "$TYPE" == "AAAA" ]]; then
+            CURL_IP_OPTS+=("-6")
+        else
+            CURL_IP_OPTS+=("-4")
+        fi
     fi
 
     for raw_host in "${HOST_ARRAY[@]}"; do
@@ -1065,7 +1082,7 @@ cert_list() {
 
     local resp
     resp=$(api_post "${CERT_API}/list" domain "$domain")
-    local st msg
+    local st
     st=$(json_status "$resp")
 
     if [[ "$st" != "success" ]]; then
@@ -1203,13 +1220,20 @@ _cert_cron_add() {
     local cron_cmd="${cron_min} ${cron_hour} * * * /bin/bash ${script_path} cert-sync ${domain} >/dev/null 2>&1"
     local cron_tag="# vps8-cert-sync:${domain}"
 
-    # Remove existing entry for this domain (fixed-string match to avoid regex issues)
+    # Remove existing entry for this domain (both cron line and tag line)
     local existing
     existing=$(crontab -l 2>/dev/null || true)
+    existing=$(echo "$existing" | grep -vF "cert-sync ${domain}")
     existing=$(echo "$existing" | grep -vF "$cron_tag")
+    # Strip blank lines
+    existing=$(echo "$existing" | sed '/^[[:space:]]*$/d')
 
     # Add new entry
-    printf '%s\n%s %s\n' "$existing" "$cron_cmd" "$cron_tag" | crontab -
+    if [[ -n "$existing" ]]; then
+        printf '%s\n%s %s\n' "$existing" "$cron_cmd" "$cron_tag" | crontab -
+    else
+        printf '%s %s\n' "$cron_cmd" "$cron_tag" | crontab -
+    fi
     ok "已设置每日 $(printf '%02d:%02d' "$cron_hour" "$cron_min") 自动更新 ${domain} 的证书"
     info "查看: crontab -l"
     info "删除: crontab -l | grep -vF '${cron_tag}' | crontab -"
@@ -1272,10 +1296,16 @@ cert_cron_manage() {
     local tag="# vps8-cert-sync:${domain}"
 
     if [[ "${cron_status[$idx]}" == "on" ]]; then
-        # Disable: remove cron entry
+        # Disable: remove both the cron command line and the tag line
         local updated
-        updated=$(echo "$existing_cron" | grep -vF "$tag")
-        echo "$updated" | crontab -
+        updated=$(echo "$existing_cron" | grep -vF "cert-sync ${domain}")
+        updated=$(echo "$updated" | grep -vF "$tag")
+        updated=$(echo "$updated" | sed '/^[[:space:]]*$/d')
+        if [[ -n "$updated" ]]; then
+            echo "$updated" | crontab -
+        else
+            crontab -r 2>/dev/null || true
+        fi
         ok "${domain} 自动更新已关闭"
     else
         # Enable: add cron entry
@@ -1369,7 +1399,7 @@ cert_renew() {
     info "正在发起续签请求..."
     local resp
     resp=$(api_post_retry "${CERT_API}/renew" domain "$domain")
-    local st msg
+    local st
     st=$(json_status "$resp")
 
     if [[ "$st" == "success" ]]; then
@@ -1493,8 +1523,8 @@ cli_usage() {
     delete <domain> <id>        删除 DNS 记录
 
   DDNS:
-    ddns <domain> [type] [value] [name] [ttl]
-                                DDNS 动态更新 (默认 A 记录)
+    ddns <domain> [type] [name] [ttl]
+                                 DDNS 动态更新 (默认 A 记录)
 
   证书管理:
     cert-list <domain>          查询证书
@@ -1613,8 +1643,8 @@ cli_dispatch() {
 
         # DDNS
         ddns)
-            # If DDNS updater is installed, just run it
-            if [[ -x "$DDNS_UPDATE" ]]; then
+            # If DDNS updater is installed and no extra args given, run it
+            if [[ -x "$DDNS_UPDATE" && $# -eq 0 ]]; then
                 bash "$DDNS_UPDATE"
                 exit $?
             fi
@@ -1624,7 +1654,11 @@ cli_dispatch() {
             rtype=$(echo "$rtype" | tr '[:lower:]' '[:upper:]')
             is_domain "$domain" || { err "无效域名"; return 1; }
             local curl_opts=()
-            [[ "$rtype" == "AAAA" ]] && curl_opts+=("-6") || curl_opts+=("-4")
+            if [[ "$rtype" == "AAAA" ]]; then
+                curl_opts+=("-6")
+            else
+                curl_opts+=("-4")
+            fi
             local payload
             payload=$(printf '{"domain":"%s","record_name":"%s","record_type":"%s","ttl":%s}' \
                 "$domain" "$rname" "$rtype" "$ttl")
@@ -1651,9 +1685,9 @@ cli_dispatch() {
                     return 0
                 fi
                 if (( attempt < max_retries )); then
-                    local wait=$(( attempt * 2 ))
-                    _log WARN "DDNS attempt $attempt failed (http=$http_code), retrying in ${wait}s..."
-                    sleep "$wait"
+                    local delay=$(( attempt * 2 ))
+                    _log WARN "DDNS attempt $attempt failed (http=$http_code), retrying in ${delay}s..."
+                    sleep "$delay"
                 fi
             done
             err "DDNS 失败: http=$http_code (after $max_retries attempts)"
@@ -1748,19 +1782,34 @@ cli_dispatch() {
             ;;
         update)
             info "正在从 GitHub 更新..."
-            local tmp_file
+            local tmp_file checksum_file
             tmp_file=$(mktemp)
+            _register_temp "$tmp_file"
             if curl -fsSL "$RAW_URL" -o "$tmp_file" 2>/dev/null; then
+                if ! bash -n "$tmp_file" 2>/dev/null; then
+                    err "下载的文件语法检查失败，已取消更新"
+                    return 1
+                fi
+                # SHA-256 integrity check (soft — skip if checksum file not published)
+                checksum_file=$(mktemp)
+                _register_temp "$checksum_file"
+                if curl -fsSL "${RAW_URL}.sha256" -o "$checksum_file" 2>/dev/null; then
+                    local expected actual
+                    expected=$(awk '{print $1}' "$checksum_file" 2>/dev/null)
+                    actual=$(sha256sum "$tmp_file" 2>/dev/null | awk '{print $1}' || md5sum "$tmp_file" 2>/dev/null | awk '{print $1}')
+                    if [[ -n "$expected" && "$expected" != "$actual" ]]; then
+                        err "文件校验失败: 预期 $expected, 实际 $actual"
+                        return 1
+                    fi
+                fi
                 local target="$INSTALL_PATH"
                 [[ ! -f "$target" ]] && target="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
                 cp "$tmp_file" "$target"
                 chmod +x "$target"
-                rm -f "$tmp_file"
                 ok "已更新到最新版本: $target"
                 info "请重新运行: bash $target"
                 exit 0
             else
-                rm -f "$tmp_file"
                 err "更新失败，请检查网络"
                 return 1
             fi
